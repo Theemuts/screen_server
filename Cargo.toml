@@ -1,0 +1,18 @@
+[package]
+name = "screen_server"
+version = "0.1.0"
+authors = ["thomas <thomas.v.d@gmail.com>"]
+
+[dependencies]
+libc = "*"
+rustfft = "1.0.1"
+num = "0.1.33"
+
+[dependencies.x11]
+version = "2.6.1"
+features = ["xlib"]
+
+[[bin]]
+name = "screen_server"
+path = "src/main.rs"
+
