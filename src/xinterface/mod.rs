@@ -51,9 +51,9 @@ pub fn copy_image(image: *mut xlib::XImage, dest: &mut Vec<u8>, width: u32, heig
             unsafe {
                 let pix: u64 = xlib::XGetPixel(image, x, y);
 
-                let rpix = ((pix & 16711680) >> 16) as u8;
-                let gpix = ((pix & 65280) >> 8) as u8;
-                let bpix = (pix & 255) as u8;
+                let rpix = ((pix & (*image).red_mask) >> 16) as u8;
+                let gpix = ((pix & (*image).green_mask) >> 8) as u8;
+                let bpix = (pix & (*image).blue_mask) as u8;
 
                 dest[dest_ind] = rpix;
                 dest[dest_ind + 1] = gpix;

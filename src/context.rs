@@ -1,9 +1,17 @@
 use super::xinterface;
 use super::x11::xlib;
+use super::util::get_data;
+
+use std::io;
+use std::io::prelude::*;
+use std::io::BufWriter;
+use std::fs::File;
+
+use num_iter::range_step;
 
 #[derive(Debug)]
 pub struct Context {
-    image_pointer: Option<*mut xlib::XImage>,
+    pub image_pointer: Option<*mut xlib::XImage>,
     display: *mut xlib::Display,
     window: u64,
     width: u32,
@@ -11,19 +19,24 @@ pub struct Context {
     offset_x: i32,
     offset_y: i32,
     client_state: Vec<u8>,
-    bbp: u32,
+    bpp: u32,
+    raw_bpp: u32,
+    size: usize,
+    state_size: u32,
+    raw_size: u32,
     block_size: u32,
+    macroblock_size: u32,
     n_blocks: usize,
     n_blocks_x: u32,
     n_blocks_y: u32,
-    errors: Vec<(i64, usize)>,
+    pub errors: Vec<(i64, usize)>,
     block_table: Vec<usize>
 }
 
 impl Context {
     pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32) -> Self {
-        if (height % 8 != 0) | (width % 8 != 0) {
-            panic!("height and width must be divisible by 8")
+        if (height % 16 != 0) | (width % 16 != 0) {
+            panic!("height and width must be divisible by 16")
         }
 
         let display = xinterface::open_display();
@@ -33,7 +46,7 @@ impl Context {
         let n_blocks_y = height / block_size;
         let n_blocks = (n_blocks_x * n_blocks_y) as usize;
 
-        let n = (width * height * 3) as usize;
+        let bpp = 3;
 
         let mut c = Context {
             image_pointer: None,
@@ -43,14 +56,19 @@ impl Context {
             height: height,
             offset_x: offset_x,
             offset_y: offset_y,
-            client_state: vec![0u8; (height*width*3) as usize],
-            bbp: 3,
+            client_state: vec![0u8; (height*width*bpp) as usize],
+            bpp: bpp,
+            raw_bpp: 4,
             block_size: 8,
+            macroblock_size: 16,
+            size: (height*width) as usize,
+            state_size: height*width*bpp,
+            raw_size: height*width*4,
             n_blocks: n_blocks,
             n_blocks_x: n_blocks_x,
             n_blocks_y: n_blocks_y,
             errors: vec![(0i64, 0usize); n_blocks],
-            block_table: vec![0usize; n]
+            block_table: vec![0usize; (width*height) as usize]
         };
 
         c.generate_block_lookup_table();
@@ -66,6 +84,7 @@ impl Context {
             self.image_pointer = None;
         }
 
+        // Use a modern GPU...
         let image = xinterface::get_image(self.display, self.window,
                                           self.width, self.offset_x,
                                           self.height, self.offset_y);
@@ -82,52 +101,43 @@ impl Context {
     }
 
     pub fn set_block_errors(&mut self) {
-        let im_pointer = self.image_pointer.unwrap();
-
+        let data = get_data(self.image_pointer);
         // Define here for speed
-        let data;
         let mut r;
         let mut g;
         let mut b;
         let mut d_b;
         let mut d_g;
         let mut d_r;
-        let mut bl;
-
-        // Set data to data in XImage. Much faster than XGetPixel
-        unsafe {
-            data = (*im_pointer).data;
-        }
 
         // Reset errors.
         for n in 0..self.errors.len() {
             self.errors[n] = (0, n);
         }
 
-        let mut ind = 0;
-        let mut i = 0;
-        let lim = (4*self.height * self.width) as isize;
-
         // Get all pixels and errors
-        while ind < lim {
+        let it = (&self.block_table).iter().enumerate();
+        let mut raw_ind;
+        let mut state_ind;
+
+        for (ind, block) in it {
+            raw_ind = ind as isize * 4;
+            state_ind = ind * 3;
+
             unsafe {
-                b = *data.offset(ind) as u8;
-                g = *data.offset(ind + 1) as u8;
-                r = *data.offset(ind + 2) as u8;
+                b = *data.offset(raw_ind) as u8;
+                g = *data.offset(raw_ind + 1) as u8;
+                r = *data.offset(raw_ind + 2) as u8;
             }
 
-            d_r = r as i64 - self.client_state[i] as i64;
-            d_g = g as i64 - self.client_state[i + 1] as i64;
-            d_b = b as i64 - self.client_state[i + 2] as i64;
+            d_r = r as i64 - self.client_state[state_ind] as i64;
+            d_g = g as i64 - self.client_state[state_ind + 1] as i64;
+            d_b = b as i64 - self.client_state[state_ind + 2] as i64;
 
-            bl = self.block_table[i];
-            self.errors[bl].0 += d_r * d_r + d_g * d_g + d_b * d_b;
-
-            ind += 4;
-            i += 3;
+            self.errors[*block].0 += d_r * d_r + d_g * d_g + d_b * d_b;
         }
 
-        // Sort errors for consumption
+        // Sort errors for consumption, largest errors first.
         self.errors.sort_by(|a, b| b.cmp(a));
     }
 
@@ -172,30 +182,81 @@ impl Context {
     }
 
     fn generate_block_lookup_table(&mut self) {
-        for n in 0..self.width * self.height * self.bbp {
-            let mut scaled_n = n / self.bbp;
-            scaled_n = (scaled_n - scaled_n % self.block_size) / self.block_size;
-            let block_x = scaled_n % self.n_blocks_x;
-            scaled_n = (scaled_n - block_x) / self.n_blocks_x;
-            let block_y = (scaled_n - scaled_n % self.block_size) / self.block_size;
-            let block = (block_y * self.n_blocks_x + block_x) as usize;
-            self.block_table[n as usize] = block;
+        let macroblocks_x = (self.width / self.macroblock_size) as usize;
+        let mut col;
+        let mut row;
+
+        for n in 0..self.size {
+            col = n % self.width as usize;
+            row = (n - col) / self.width as usize;
+            row /= self.macroblock_size as usize;
+            row *= macroblocks_x;
+            col /= self.macroblock_size as usize;
+            self.block_table[n] = row + col;
         }
     }
 
-        /*pub fn send_initial_state(&self) {
-            // Encode all blocks
-            //Send all blocks and await ack.
+    pub fn store_client_state(&self) -> io::Result<()> {
+        let mut buffer = BufWriter::new(try!(File::create("foo.txt")));
+        for x in &self.client_state {
+            try!(write!(buffer, "{} ", x));
         }
 
-        pub fn send_changed_blocks(&self) {
-            // Consume changed blocks.
-                // Check time
-                // Encode changed block
-                // Add to send queue
-                // Optimistic state update
-        }
+        try!(buffer.flush());
 
-        }*/
+        Ok(())
+    }
+
+    pub fn update_client_state(&mut self, blocks_to_update: usize) {
+        let data = get_data(self.image_pointer);
+
+        let blocks_x = if self.width % 16 == 0 {
+            self.width as isize / 16
+        } else {
+            (self.width as isize + 8)/16
+        };
+
+        for i in 0..blocks_to_update {
+            let (_, block) = self.errors[i];
+
+            let mut r;
+            let mut g;
+            let mut b;
+            let mut dest_ind;
+
+            // Calculate initial index
+            let x_block = block as isize % blocks_x;
+            let x0 = x_block*64;
+            let y0 = (block as isize - x_block)*16/blocks_x;
+            let ind0 = y0 * 4 * self.width as isize + x0;
+
+            for row_ind in range_step(ind0, ind0 + 16*4*self.width as isize, 4*self.width as isize) {
+                for ind in range_step(row_ind, row_ind + 16*4, 4) {
+                    if ind >= (4 * self.width * self.height) as isize {
+                        break
+                    }
+
+                    b = value_at(data, ind, (self.width*self.height) as isize * 4);
+                    g = value_at(data, ind + 1, (self.width*self.height) as isize * 4);
+                    r = value_at(data, ind + 2, (self.width*self.height) as isize * 4);
+
+                    dest_ind = ind as usize*3/4;
+
+                    self.client_state[dest_ind] = r;
+                    self.client_state[dest_ind+1] = g;
+                    self.client_state[dest_ind+2] = b;
+                }
+            }
+        }
+    }
 }
 
+fn value_at(s: *mut i8, index: isize, size: isize) -> u8 {
+    unsafe {
+        if index < size {
+            *s.offset(index) as u8
+        } else {
+            *s.offset(size - 1) as u8
+        }
+    }
+}

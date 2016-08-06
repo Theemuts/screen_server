@@ -5,8 +5,7 @@ authors = ["thomas <thomas.v.d@gmail.com>"]
 
 [dependencies]
 libc = "*"
-rustfft = "1.0.1"
-num = "0.1.33"
+num-iter = "0.1.32"
 
 [dependencies.x11]
 version = "2.6.1"

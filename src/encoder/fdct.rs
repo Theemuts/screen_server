@@ -1,8 +1,7 @@
 /*
 This fdct implementation has been copied from
-https://raw.githubusercontent.com/PistonDevelopers/
-image/fbe7a0c5dd90a69a3eb2bd18edd583f2156aa08f/src/
-jpeg/transform.rs
+https://raw.githubusercontent.com/PistonDevelopers/image/
+fbe7a0c5dd90a69a3eb2bd18edd583f2156aa08f/src/jpeg/transform.rs
 */
 
 /*
