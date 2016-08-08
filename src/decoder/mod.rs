@@ -84,7 +84,7 @@ impl<T: Copy + Debug> Tree<T> {
 
         while let Some(current) = iter.next() {
             // If they are adjacent and belong to the same node, merge
-            if (previous.0 == current.0) & ((previous.1 as i16 - current.1 as i16) == 1) {
+            if (previous.0 == current.0) & ((previous.1 as i32 - current.1 as i32) == 1) {
                 tr = Tree::Node {
                     left: previous.2,
                     right: current.2.clone()
