@@ -11,7 +11,7 @@ pub enum Tree<T> {
 }
 
 impl<T: Copy + Debug> Tree<T> {
-    pub fn get(& self, size: u8, code: u16) -> Option<T> {
+    pub fn get(&self, size: u8, code: u16) -> Option<T> {
         if size > 16 {
             panic!("invalid code length");
         }
@@ -31,101 +31,98 @@ impl<T: Copy + Debug> Tree<T> {
 
                 Some(v)
             },
-            Tree::Node {left: ref l, right: ref r} => {
+            Tree::Node { left: ref l, right: ref r } => {
                 if size == 0 {
                     panic!("Invalid code used");
                 }
 
-                if code & 1 == 1 {
-                    (&l).get(size - 1, code >> 1)
+                let y = 0xFFFF >> (17 - size) as u16;
+                let z = 0x8000 >> (16 - size) as u16;
+                if (code & z) >> (size - 1) as u16 == 1 {
+                    (&l).get(size - 1, code & y)
                 } else {
-                    (&r).get(size - 1, code >> 1)
+                    (&r).get(size - 1, code & y)
                 }
             }
         }
     }
 
-    pub fn generate_tree(scv: &Vec<(u8, u16, Box<Tree<T>>)>)
-            -> Box<Tree<T>> {
-
-        if scv.len() == 1 {
-            return scv[0].2.clone()
-        }
+    // TODO: avoid excessive cloning
+    pub fn generate_tree(size_code_value: &Vec<(u8, u16, Box<Tree<T>>)>)
+        -> Box<Tree<T>> {
+        let mut sc = size_code_value.clone();
 
         // Repeatedly merge adjacent nodes until one element remains: the tree itself.
-        let mut sc = scv.clone();
-        while sc.len() != 1 {
-            sc = Tree::merge_adjacent(&mut sc);
+        if size_code_value.len() > 1 {
+            while sc.len() != 1 {
+                sc = Tree::merge_adjacent(&mut sc);
+            }
         }
 
-        return sc[0].2.clone()
+        sc[0].2.clone()
     }
 
-    fn merge_adjacent(scv: &mut Vec<(u8, u16, Box<Tree<T>>)>)
-            -> Vec<(u8, u16, Box<Tree<T>>)> {
-
-        let mut new_scv = Vec::with_capacity(scv.len());
+    fn merge_adjacent(size_code_value: &mut Vec<(u8, u16, Box<Tree<T>>)>)
+        -> Vec<(u8, u16, Box<Tree<T>>)> {
+        let mut new_size_code_value = Vec::with_capacity(size_code_value.len());
 
         // Sort (size, code, value)-vector. Largest size first, then largest code first.
-        scv.sort_by(|a, b| {
-            let (size_a, code_a, _) = *a;
-            let (size_b, code_b, _) = *b;
-            let a = (size_a, code_a);
-            let b = (size_b, code_b);
-            b.cmp(&a)
-        });
+        size_code_value.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        //println!("scv: {:?}", size_code_value);
 
-        let mut iter = scv.iter();
+        let mut iter = size_code_value.iter();
         let mut merged = 0;
 
         // Get next two elements
         let mut previous = iter.next().unwrap().clone();
-        let mut tr;
+        let mut node;
 
         while let Some(current) = iter.next() {
             // If they are adjacent and belong to the same node, merge
-            if (previous.0 == current.0) & ((previous.1 as i32 - current.1 as i32) == 1) {
-                tr = Tree::Node {
+            //println!("previous: ({} {})", previous.0, previous.1);
+            //println!("current: ({} {})", current.0, current.1);
+            if (previous.0 == current.0) & (previous.1 & 1 == 1) & ((previous.1 as i32 - current.1 as i32) == 1) {
+                node = Box::new(Tree::Node {
                     left: previous.2,
                     right: current.2.clone()
-                };
+                });
 
                 // Increment merge counter, set merged as new previous
                 merged += 1;
-                previous.0 -= 1;
-                previous.1 >>= 1;
-                previous.2 = Box::new(tr);
+                previous.0 -= 1; // decrement size
+                previous.1 >>= 1; // right shift code
+                previous.2 = node; // box the new node
             } else {
-                // Not adjacent, push previous new_scv
+                // Not adjacent, push previous to new_size_code_value
                 // Set current as new previous
-                new_scv.push((previous.0, previous.1, previous.2));
+                new_size_code_value.push((previous.0, previous.1, previous.2));
                 previous = current.clone();
             }
         }
 
-        // Done, push previous to new_scv
-        new_scv.push(previous);
+        // Done, push previous to new_size_code_value
+        new_size_code_value.push(previous);
 
         // If merged == 0, use first element and merge it with None.
         // Using first element is safe because sort order has not changed.
         if merged == 0 {
-            tr = if new_scv[0].1 & 1 == 1 {
-                Tree::Node {
-                    left: new_scv[0].2.clone(),
+            node = if new_size_code_value[0].1 & 1 == 1 {
+                Box::new(Tree::Node {
+                    left: new_size_code_value[0].2.clone(),
                     right: Box::new(Tree::None)
-                }
+                })
             } else {
-                Tree::Node {
+                Box::new(Tree::Node {
                     left: Box::new(Tree::None),
-                    right: new_scv[0].2.clone()
-                }
+                    right: new_size_code_value[0].2.clone()
+                })
             };
 
-            new_scv[0].0 -= 1;
-            new_scv[0].1 >>= 1;
-            new_scv[0].2 = Box::new(tr);
+            new_size_code_value[0].0 -= 1;
+            new_size_code_value[0].1 >>= 1;
+            new_size_code_value[0].2 = node;
         }
 
-        new_scv
+        new_size_code_value
     }
 }

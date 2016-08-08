@@ -149,15 +149,17 @@ impl Encoder {
         tables.extend(STD_CHROMA_QTABLE.iter().map(|&v| v));
 
         let mut scv = Vec::new();
-        scv.push((2, 3, Box::new(Tree::Leaf(7))));
-        scv.push((3, 0, Box::new(Tree::Leaf(3))));
-        scv.push((2, 1, Box::new(Tree::Leaf(5))));
-        scv.push((3, 1, Box::new(Tree::Leaf(8))));
-        scv.push((2, 2, Box::new(Tree::Leaf(1))));
+
+        for (i, value) in ld.iter().enumerate() {
+            if value.0 < 17 {
+                scv.push((value.0, value.1, Box::new(Tree::Leaf(i as u8))));
+            }
+        }
 
         let sc = Tree::generate_tree(&scv);
+        let v = sc.get(6, 62);
 
-        println!("{:?}", sc);
+        println!("{:?}", v);
 
         Encoder {
             tables: tables,
@@ -357,7 +359,7 @@ impl Encoder {
             } else {
                 while zero_run > 15 {
                     // Write f(0xF0) for every 16 consecutive zeros
-                    let _ = self.huffman_encode(0xF0, actable);
+                    self.huffman_encode(0xF0, actable);
                     zero_run -= 16;
                 }
 
