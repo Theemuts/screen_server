@@ -79,41 +79,37 @@ impl<T: Copy + Debug> Tree<T> {
         let mut merged = 0;
 
         // Get next two elements
-        let mut x: (u8, u16, Box<Tree<T>>);
-        let mut v1 = iter.next().unwrap().clone();
-        let mut size;
-        let mut code;
+        let mut previous = iter.next().unwrap().clone();
         let mut tr;
 
-        while let Some(v2) = iter.next() {
+        while let Some(current) = iter.next() {
             // If they are adjacent and belong to the same node, merge
-            if (v1.0 == v2.0) & ((v1.1 as i16 - v2.1 as i16) == 1) {
+            if (previous.0 == current.0) & ((previous.1 as i16 - current.1 as i16) == 1) {
                 tr = Tree::Node {
-                    left: v1.2.clone(),
-                    right: v2.2.clone()
+                    left: previous.2,
+                    right: current.2.clone()
                 };
 
-                // Merging decreases size by 1, right shifts code by 1 (eg: 010 -> 01)
-                size = v1.0 - 1;
-                code = v1.1 >> 1;
-
-                // Increment merge counter, set merged as new v1
+                // Increment merge counter, set merged as new previous
                 merged += 1;
-                v1 = (size, code, Box::new(tr));
+                previous.0 -= 1;
+                previous.1 >>= 1;
+                previous.2 = Box::new(tr);
             } else {
-                // Not adjacent, push v1 new_scv
-                // Set v2 as new v1
-                new_scv.push((v1.0, v1.1, v1.2.clone()));
-                v1 = v2.clone();
+                // Not adjacent, push previous new_scv
+                // Set current as new previous
+                new_scv.push((previous.0, previous.1, previous.2));
+                previous = current.clone();
             }
         }
 
-        // Done, push v1 to new_scv
-        new_scv.push(v1.clone());
+        // Done, push previous to new_scv
+        new_scv.push(previous);
 
         // If merged == 0, use first element and merge it with None.
+        // Using first element is safe because sort order has not changed.
         if merged == 0 {
-            let tr = if new_scv[0].1 & 1 == 1 {
+            tr = if new_scv[0].1 & 1 == 1 {
                 Tree::Node {
                     left: new_scv[0].2.clone(),
                     right: Box::new(Tree::None)
@@ -125,7 +121,9 @@ impl<T: Copy + Debug> Tree<T> {
                 }
             };
 
-            new_scv[0] = (new_scv[0].0 - 1, new_scv[0].1 >> 1, Box::new(tr));
+            new_scv[0].0 -= 1;
+            new_scv[0].1 >>= 1;
+            new_scv[0].2 = Box::new(tr);
         }
 
         new_scv
