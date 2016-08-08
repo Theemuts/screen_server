@@ -8,6 +8,7 @@ use std::time::{SystemTime, Duration};
 mod xinterface;
 mod context;
 mod encoder;
+mod decoder;
 mod util;
 
 fn main () {
@@ -17,12 +18,17 @@ fn main () {
     let offset_y = 0;
     let raw_bbp = 4;
 
+    //divide fr by 1.003, result is closer to wanted framerate.
+    let mut fr = 24u64;
+    fr = 1_000_000_000_000u64 / (1003u64 * fr);
+    let frame_duration = Duration::new(0, fr as u32);
+
     let mut encoder = encoder::Encoder::new(width as isize, height as isize, raw_bbp);
     let mut context = context::Context::new(width, offset_x, height, offset_y);
     let _ = encoder.initial_encode_rgb(&context);
     println!("Initial size: {}", encoder.sink_size());
 
-    let n = 100*24;
+    let n = 24;
     let mut sizes = Vec::with_capacity(n);
     let mut times = Vec::with_capacity(n);
 
@@ -30,17 +36,12 @@ fn main () {
     let mut t5;
     let mut sent;
 
-    //divide fr by 1.003, result is closer to wanted framerate.
-    let mut fr = 24u64;
-    fr = 1_000_000_000_000u64 / (1003u64 * fr);
-    let frame_duration = Duration::new(0, fr as u32);
-
     for _ in 0..n {
         t5 = SystemTime::now();
         context.get_new_screenshot();
         context.set_block_errors();
         sent = encoder.update_encode_rgb(&context);
-        context.update_client_state(sent.unwrap());
+        context.update_client_state(sent);
         sizes.push(encoder.sink_size());
 
         if frame_duration > t5.elapsed().unwrap() {
@@ -51,7 +52,7 @@ fn main () {
     }
 
     let t4 = t4.elapsed().unwrap();
-    context.store_client_state();
+    let _ = context.store_client_state();
 
     let av_s = av(&sizes);
     let std_s = std(&sizes, av_s);

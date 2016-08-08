@@ -6,39 +6,16 @@ fbe7a0c5dd90a69a3eb2bd18edd583f2156aa08f/src/jpeg/encoder.rs
 
 mod fdct;
 mod entropy;
+mod sink;
 
 use super::context::Context;
-use super::encoder::fdct::fdct;
-use super::encoder::entropy::build_huff_lut;
+use super::decoder::Tree;
+use self::fdct::fdct;
+use self::sink::Sink;
+use self::entropy::build_huff_lut;
 use super::util::get_data;
 
-use std::io::{self, Write};
 use num_iter::range_step;
-
-/// A representation of a JPEG component
-#[derive(Debug, Copy, Clone)]
-struct Component {
-    /// The Component's identifier
-    id: u8,
-
-    /// Horizontal sampling factor
-    h: u8,
-
-    /// Vertical sampling factor
-    v: u8,
-
-    /// The quantization table selector
-    tq: u8,
-
-    /// Index to the Huffman DC Table
-    dc_table: u8,
-
-    /// Index to the AC Huffman Table
-    ac_table: u8,
-
-    /// The dc prediction of the component
-    dc_pred: i32
-}
 
 // section K.1
 // table K.1
@@ -127,13 +104,6 @@ static STD_CHROMA_AC_VALUES: [u8; 162] = [
     0xF9, 0xFA,
 ];
 
-static LUMADESTINATION: u8 = 0;
-static CHROMADESTINATION: u8 = 1;
-
-static LUMAID: u8 = 1;
-static CHROMABLUEID: u8 = 2;
-static CHROMAREDID: u8 = 3;
-
 /// The permutation of dct coefficients.
 static UNZIGZAG: [u8; 64] = [
     0,  1,  8, 16,  9,  2,  3, 10,
@@ -148,7 +118,6 @@ static UNZIGZAG: [u8; 64] = [
 
 #[derive(Debug)]
 pub struct Encoder {
-    components: Vec<Component>,
     tables: Vec<u8>,
     luma_dctable: Vec<(u8, u16)>,
     luma_actable: Vec<(u8, u16)>,
@@ -163,7 +132,8 @@ pub struct Encoder {
     accumulator: u32,
     nbits: u8,
 
-    sink: Vec<u8>,
+    size_accumulator: u64,
+    sink: Sink
 }
 
 impl Encoder {
@@ -178,14 +148,18 @@ impl Encoder {
         tables.extend(STD_LUMA_QTABLE.iter().map(|&v| v));
         tables.extend(STD_CHROMA_QTABLE.iter().map(|&v| v));
 
-        let components = vec![
-            Component {id: LUMAID, h: 1, v: 1, tq: LUMADESTINATION, dc_table: LUMADESTINATION, ac_table: LUMADESTINATION, dc_pred: 0},
-            Component {id: CHROMABLUEID, h: 1, v: 1, tq: CHROMADESTINATION, dc_table: CHROMADESTINATION, ac_table: CHROMADESTINATION, dc_pred: 0},
-            Component {id: CHROMAREDID, h: 1, v: 1, tq: CHROMADESTINATION, dc_table: CHROMADESTINATION, ac_table: CHROMADESTINATION, dc_pred: 0}
-        ];
+        let mut scv = Vec::new();
+        scv.push((2, 3, Box::new(Tree::Leaf(7))));
+        scv.push((3, 0, Box::new(Tree::Leaf(3))));
+        scv.push((2, 1, Box::new(Tree::Leaf(5))));
+        scv.push((3, 1, Box::new(Tree::Leaf(8))));
+        scv.push((2, 2, Box::new(Tree::Leaf(1))));
+
+        let sc = Tree::generate_tree(&scv);
+
+        println!("{:?}", sc);
 
         Encoder {
-            components: components,
             tables: tables,
             luma_dctable: ld,
             luma_actable: la,
@@ -197,14 +171,16 @@ impl Encoder {
             macroblock_size: 16,
             bpp: bpp,
             accumulator: 0,
+            size_accumulator: 0,
             nbits: 0,
 
-            sink: Vec::with_capacity((height*width*bpp) as usize),
+            sink: Sink::new((height*width/256) as usize, 768) // 16*16*3 subpixels per macroblock
         }
     }
 
-    pub fn initial_encode_rgb(&mut self, context: &Context) -> io::Result<()> {
+    pub fn initial_encode_rgb(&mut self, context: &Context) {
         let data = get_data(context.image_pointer);
+        self.sink.clear();
 
         let mut dct_yblock   = [0i32; 64];
         let mut dct_cb_block = [0i32; 64];
@@ -219,13 +195,16 @@ impl Encoder {
         let cd = self.chroma_dctable.clone();
         let ca = self.chroma_actable.clone();
 
-        self.sink = Vec::with_capacity((self.size * self.bpp) as usize);
         let mut x;
         let mut y;
+
+        let mut bl = 0;
 
         for y0 in range_step(0, self.height, self.macroblock_size) {
             for x0 in range_step(0, self.width, self.macroblock_size) {
                 // RGB -> YCbCr
+
+                self.sink.new_block(bl);
 
                 for j in 0..2 {
                     for i in 0..2 {
@@ -248,23 +227,25 @@ impl Encoder {
                             dct_cr_block[i] = ((dct_cr_block[i] / 8) as f32 / self.tables[64..][i] as f32).round() as i32;
                         }
 
-                        try!(self.write_block(&dct_yblock, 0, &ld, &la));
-                        try!(self.write_block(&dct_cb_block, 0, &cd, &ca));
-                        try!(self.write_block(&dct_cr_block, 0, &cd, &ca));
+                        self.write_block(&dct_yblock, &ld, &la);
+                        self.write_block(&dct_cb_block, &cd, &ca);
+                        self.write_block(&dct_cr_block, &cd, &ca);
                     }
                 }
+                bl += 1;
+                self.write_final_bits();
             }
         }
-
-        Ok(())
     }
 
     pub fn sink_size(&self) -> f64 {
         self.sink.len() as f64
     }
 
-    pub fn update_encode_rgb(&mut self, context: &Context) -> io::Result<usize> {
+    pub fn update_encode_rgb(&mut self, context: &Context) -> usize {
         let data = get_data(context.image_pointer);
+
+        self.sink.clear();
         let mut sent = 0;
 
         let mut dct_yblock   = [0i32; 64];
@@ -280,8 +261,6 @@ impl Encoder {
         let cd = self.chroma_dctable.clone();
         let ca = self.chroma_actable.clone();
 
-        self.sink = Vec::with_capacity((self.height*self.width*self.bpp) as usize);
-
         for error in &context.errors {
             let (err, block) = *error;
             if err == 0 {
@@ -289,6 +268,7 @@ impl Encoder {
                 // TODO: don't add zero-error blocks to the error vec?
                 break
             }
+            self.sink.new_block(block);
 
             // Speed up with lookup table?
 
@@ -303,8 +283,6 @@ impl Encoder {
             let block_mod: isize = block as isize % n_blocks_x;
             let x0: isize = 64*block_mod;
             let y0: isize = (block as isize - block_mod)/n_blocks_x;
-
-            let mut tot = 0;
 
             for y in range_step(y0, y0+16, 8) {
                 for x in range_step(x0, x0+64, 32) { // 2 * 4 * 8
@@ -324,25 +302,20 @@ impl Encoder {
                         dct_cr_block[i] = ((dct_cr_block[i] / 8) as f32 / self.tables[64..][i] as f32).round() as i32;
                     }
 
-                    try!(self.write_block(&dct_yblock, 0, &ld, &la));
-                    try!(self.write_block(&dct_cb_block, 0, &cd, &ca));
-                    try!(self.write_block(&dct_cr_block, 0, &cd, &ca));
-
-                    tot += 1;
+                    self.write_block(&dct_yblock, &ld, &la);
+                    self.write_block(&dct_cb_block, &cd, &ca);
+                    self.write_block(&dct_cr_block, &cd, &ca);
                 }
             }
 
-            if tot != 4 {
-                panic!(":(");
-            }
-
+            self.write_final_bits();
             sent += 1;
         }
 
-        Ok(sent)
+        sent
     }
 
-    fn huffman_encode(&mut self, val: u8, table: &[(u8, u16)]) -> io::Result<()> {
+    fn huffman_encode(&mut self, val: u8, table: &[(u8, u16)]) {
         let (size, code) = table[val as usize];
 
         if size > 16 {
@@ -355,17 +328,16 @@ impl Encoder {
     fn write_block(
         &mut self,
         block: &[i32],
-        prevdc: i32,
         dctable: &[(u8, u16)],
-        actable: &[(u8, u16)]) -> io::Result<i32> {
+        actable: &[(u8, u16)]) -> i32 {
 
         // Differential DC encoding
         let dcval = block[0];
-        let diff  = dcval - prevdc;
+        let diff  = dcval;
         let (size, value) = encode_coefficient(diff);
 
-        let _ = try!(self.huffman_encode(size, dctable));
-        let _ = try!(self.write_bits(value, size));
+        self.huffman_encode(size, dctable);
+        self.write_bits(value, size);
 
         // Figure F.2
         let mut zero_run = 0;
@@ -376,23 +348,24 @@ impl Encoder {
 
             if block[UNZIGZAG[k] as usize] == 0 {
                 if k == 63 {
-
-                    let _ = try!(self.huffman_encode(0x00, actable));
+                    // Final element. Write f(0x00) to indicate end of block
+                    self.huffman_encode(0x00, actable);
                     break
                 }
 
                 zero_run += 1;
             } else {
                 while zero_run > 15 {
-                    let _ = try!(self.huffman_encode(0xF0, actable));
+                    // Write f(0xF0) for every 16 consecutive zeros
+                    let _ = self.huffman_encode(0xF0, actable);
                     zero_run -= 16;
                 }
 
                 let (size, value) = encode_coefficient(block[UNZIGZAG[k] as usize]);
                 let symbol = (zero_run << 4) | size;
 
-                let _ = try!(self.huffman_encode(symbol, actable));
-                let _ = try!(self.write_bits(value, size));
+                self.huffman_encode(symbol, actable);
+                self.write_bits(value, size);
 
                 zero_run = 0;
 
@@ -402,12 +375,12 @@ impl Encoder {
             }
         }
 
-        Ok(dcval)
+        dcval
     }
 
-    fn write_bits(&mut self, bits: u16, size: u8) -> io::Result<()> {
+    fn write_bits(&mut self, bits: u16, size: u8) {
         if size == 0 {
-            return Ok(())
+            return
         }
 
         self.accumulator |= (bits as u32) << (32 - (self.nbits + size)) as usize;
@@ -415,17 +388,46 @@ impl Encoder {
 
         while self.nbits >= 8 {
             let byte = (self.accumulator & (0xFFFFFFFFu32 << 24)) >> 24;
-            let _ = try!(self.sink.write_all(&[byte as u8]));
+            self.sink.write(byte as u8);
 
             if byte == 0xFF {
-                let _ = try!(self.sink.write_all(&[0x00]));
+                self.sink.write(0x00);
+            }
+
+            self.nbits -= 8;
+            self.accumulator <<= 8;
+        }
+    }
+
+    fn write_final_bits(&mut self) {
+        if self.nbits == 0 {
+            self.accumulator = 0;
+            return
+        }
+
+        while self.nbits >= 8 {
+            let byte = (self.accumulator & (0xFFFFFFFFu32 << 24)) >> 24;
+            self.sink.write(byte as u8);
+
+            if byte == 0xFF {
+                self.sink.write(0x00);
             }
 
             self.nbits -= 8;
             self.accumulator <<= 8;
         }
 
-        Ok(())
+        if self.nbits != 0 {
+            let byte = (self.accumulator & (0xFFFFFFFFu32 << 24)) >> 24;
+            self.sink.write(byte as u8);
+
+            if byte == 0xFF {
+                self.sink.write(0x00);
+            }
+        }
+
+        self.nbits = 0;
+        self.accumulator = 0;
     }
 }
 
@@ -445,8 +447,8 @@ fn copy_blocks_ycbcr(source: *mut i8,
             let ind = index + (y * width + x) * bpp;
 
             let b = value_at(source, ind, size);
-            let g = value_at(source, ind, size);
-            let r = value_at(source, ind, size);
+            let g = value_at(source, ind + 1, size);
+            let r = value_at(source, ind + 2, size);
 
             let (yc, cb, cr) = rgb_to_ycbcr(r, g, b);
 
@@ -477,7 +479,6 @@ fn encode_coefficient(coefficient: i32) -> (u8, u16) {
     (num_bits, val)
 }
 
-
 fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     let r = r as f32;
     let g = g as f32;
@@ -495,7 +496,6 @@ fn value_at(s: *mut i8, index: isize, size: isize) -> u8 {
         if index < size {
             *s.offset(index) as u8
         } else {
-            println!("{} !!! {}", index, size);
             *s.offset(size - 1) as u8
         }
     }
