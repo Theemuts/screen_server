@@ -79,38 +79,37 @@ impl<T: Copy + Debug> Tree<T> {
         let mut merged = 0;
 
         // Get next two elements
-        loop {
-            if let Some(v1) = iter.next() {
-                if let Some(v2) = iter.next() {
-                    // If they are adjacent and belong to the same node, merge
-                    if (v1.0 == v2.0) & ((v1.1 as i16 - v2.1 as i16) == 1) {
-                        let tr = Tree::Node {
-                            left: v1.2.clone(),
-                            right: v2.2.clone()
-                        };
+        let mut x: (u8, u16, Box<Tree<T>>);
+        let mut v1 = iter.next().unwrap().clone();
+        let mut size;
+        let mut code;
+        let mut tr;
 
-                        // Merging decreases size by 1, right shifts code by 1 (eg: 010 -> 01)
-                        let size = v1.0 - 1;
-                        let code = v1.1 >> 1;
+        while let Some(v2) = iter.next() {
+            // If they are adjacent and belong to the same node, merge
+            if (v1.0 == v2.0) & ((v1.1 as i16 - v2.1 as i16) == 1) {
+                tr = Tree::Node {
+                    left: v1.2.clone(),
+                    right: v2.2.clone()
+                };
 
-                        // Increment merge counter, push merged to new_scv
-                        merged += 1;
-                        new_scv.push((size, code, Box::new(tr)))
-                    } else {
-                        // Not adjacent, push both new_scv
-                        new_scv.push((v1.0, v1.1, v1.2.clone()));
-                        new_scv.push((v2.0, v2.1, v2.2.clone()));
-                    }
-                } else {
-                    // No v2, push v1 to new_scv
-                    new_scv.push((v1.0, v1.1, v1.2.clone()));
-                    break
-                }
+                // Merging decreases size by 1, right shifts code by 1 (eg: 010 -> 01)
+                size = v1.0 - 1;
+                code = v1.1 >> 1;
+
+                // Increment merge counter, set merged as new v1
+                merged += 1;
+                v1 = (size, code, Box::new(tr));
             } else {
-                // End reached
-                break
+                // Not adjacent, push v1 new_scv
+                // Set v2 as new v1
+                new_scv.push((v1.0, v1.1, v1.2.clone()));
+                v1 = v2.clone();
             }
         }
+
+        // Done, push v1 to new_scv
+        new_scv.push(v1.clone());
 
         // If merged == 0, use first element and merge it with None.
         if merged == 0 {
