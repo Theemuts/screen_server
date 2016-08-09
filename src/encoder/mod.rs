@@ -9,7 +9,8 @@ mod entropy;
 mod sink;
 
 use super::context::Context;
-use super::decoder::Tree;
+use super::decoder::tree::Tree;
+use super::decoder::prepare_lookup_table;
 use self::fdct::fdct;
 use self::sink::Sink;
 use self::entropy::build_huff_lut;
@@ -148,16 +149,9 @@ impl Encoder {
         tables.extend(STD_LUMA_QTABLE.iter().map(|&v| v));
         tables.extend(STD_CHROMA_QTABLE.iter().map(|&v| v));
 
-        let mut scv = Vec::new();
-
-        for (i, value) in ld.iter().enumerate() {
-            if value.0 < 17 {
-                scv.push((value.0, value.1, Box::new(Tree::Leaf(i as u8))));
-            }
-        }
-
+        let scv = prepare_lookup_table(&ld);
         let sc = Tree::generate_tree(&scv);
-        let v = sc.get(6, 62);
+        let v = sc.get(6, 62).unwrap();
 
         println!("{:?}", v);
 
