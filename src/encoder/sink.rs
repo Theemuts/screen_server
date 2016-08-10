@@ -18,6 +18,10 @@ impl Sink {
         }
     }
 
+    pub fn get(&self) -> Vec<u8> {
+        self.data[1].clone()
+    }
+
     pub fn write(&mut self, byte: u8) {
         self.buffer.push(byte);
     }

@@ -5,11 +5,13 @@ extern crate num_iter;
 
 use std::time::{SystemTime, Duration};
 
-mod xinterface;
 mod context;
-mod encoder;
 mod decoder;
+mod encoder;
+mod entropy;
+mod tables;
 mod util;
+mod xinterface;
 
 fn main () {
     let width = 640u32;
@@ -24,9 +26,20 @@ fn main () {
     let frame_duration = Duration::new(0, fr as u32);
 
     let mut encoder = encoder::Encoder::new(width as isize, height as isize, raw_bbp);
+  //  let mut decoder = decoder::Decoder::new();
+  //  decoder.move_pointer(0);
+   // decoder.move_pointer(1);
+    //decoder.move_pointer(0);
+    //decoder.move_pointer(1);
     let mut context = context::Context::new(width, offset_x, height, offset_y);
+
     let _ = encoder.initial_encode_rgb(&context);
     println!("Initial size: {}", encoder.sink_size());
+
+    let sn = encoder.sink.get();
+    println!("SN: {}", sn.len());
+    let mut decoder = decoder::Decoder::new(&sn);
+    decoder.decode();
 
     let n = 24;
     let mut sizes = Vec::with_capacity(n);
@@ -52,7 +65,8 @@ fn main () {
     }
 
     let t4 = t4.elapsed().unwrap();
-    let _ = context.store_client_state();
+    //let _ = context.store_client_state();
+
 
     let av_s = av(&sizes);
     let std_s = std(&sizes, av_s);
