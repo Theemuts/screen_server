@@ -18,9 +18,11 @@ pub struct Decoder<'a> {
     decoded: Vec<i32>,
     data_pointer: usize,
     buffer: u64,
+    index: usize,
     trailing: u16,
     table: Table,
-    size: u8
+    size: u8,
+    block: usize,
 }
 
 #[derive(Debug)]
@@ -57,87 +59,141 @@ impl<'a> Decoder<'a> {
             buffer: 0u64,
             data_pointer: 0usize,
             trailing: 0u16,
-            decoded: Vec::with_capacity(768*3),
+            decoded: vec![0; 192],
+            index: 0,
             table: Table::Ld,
-            size: 0
+            size: 0,
+            block: 0
         }
     }
 
     pub fn decode(&mut self) {
         self.init_buffer();
 
-        self.decode_dc();
+        /*
+        println!("decode");
+        println!("");
+        println!("buffer {:b}", self.buffer);
+        println!("trailing {}", self.trailing);
+        println!("{}/{}", self.data_pointer, self.data.len());
+        */
 
-        while self.decoded.len() < 64 {
-            self.decode_ac();
+        self.set_luma_dc();
+        self.decode_dc();
+        self.set_luma_ac();
+        self.decode_ac();
+        self.block += 1;
+
+        self.set_chroma_dc();
+        self.decode_dc();
+        self.set_chroma_ac();
+        self.decode_ac();
+        self.block += 1;
+
+        self.set_chroma_dc();
+        self.decode_dc();
+        self.set_chroma_ac();
+        self.decode_ac();
+        self.block += 1;
+        /*
+        */
+
+        for i in 0..self.decoded.len() {
+            if (i%8) == 0 {
+                println!("");
+                if (i % 64) == 0 {
+                    println!("");
+                }
+            }
+
+            print!("{}, ", self.decoded[i]);
         }
+
     }
 
-    fn decode_dc(&mut self) {
-        self.get_size();
+    pub fn decode_dc(&mut self) -> i32 {
+        self.index = 1;
 
-        let size = self.size;
+        if ((self.block % 3) != 0) & ((self.buffer >> 62) == 0x00)  {
+            self.move_buffer(2);
+            return 0;
+        }
+
+        let size = self.get_size();
         let value = self.get_bits(size);
         let decoded_value = decode_value(size, value);
 
-        self.decoded.push(decoded_value);
+        self.decoded[64 * self.block] = decoded_value;
+        decoded_value
     }
 
     fn decode_ac(&mut self) {
-        self.size = 0;
+        while self.index < 64 {
+            self.size = 0;
 
-        self.parse_zero_runs();
+            // Check for end of block.
+            if ((self.block % 3) == 0) & ((self.buffer >> 60) == 0b1010) {
+                self.move_buffer(4);
+                break;
+            } else if ((self.block % 3) != 0) & ((self.buffer >> 62) == 0)  {
+                self.move_buffer(2);
+                break;
+            }
 
-        self.get_size();
-        let sz = self.size;
+            self.parse_zero_runs();
+            let symbol = self.get_size();
 
-        let zero_run = (sz & 240) >> 4;
-        for _ in 0..zero_run {
-            self.decoded.push(0);
+            let zero_run = (symbol & 0xF0) >> 4;
+            let size = symbol & 0x0F;
+
+            self.index += zero_run as usize;
+
+            let value = self.get_bits(size);
+            let decoded_value = decode_value(size, value);
+            self.decoded[64 * self.block + UNZIGZAG[self.index] as usize] = decoded_value;
+
+            self.index += 1;
         }
-
-        let size = sz & 15;
-        let value = self.get_bits(size);
-        let decoded_value = decode_value(size, value);
-
-        self.decoded.push(decoded_value);
     }
 
     fn parse_zero_runs(&mut self) {
         while (self.buffer >> 56) as u8 == 0xF0 {
-            self.buffer <<= 8;
-
-            if self.data_pointer < self.data.len() {
-                self.buffer |= self.data[self.data_pointer] as u64;
-                self.data_pointer += 1;
-            } else {
-                self.buffer |= 0u64;
-            }
-
-            for _ in 0..16 {
-                self.decoded.push(0);
-            }
+            self.move_buffer(8);
+            self.index += 16;
         }
     }
 
-    fn get_size(&mut self) {
+    fn move_buffer(&mut self, shift: u64) {
+        self.buffer <<= shift;
+        self.trailing += shift as u16;
+
+        if (self.trailing >= 8) & (self.data_pointer < self.data.len()) {
+            self.buffer |= (self.data[self.data_pointer] as u64) << (self.trailing as u64 - 8);
+            self.data_pointer += 1;
+            self.trailing -= 8;
+        }
+
+    }
+
+    fn get_size(&mut self) -> u8 {
         let mut code;
+
         while self.size == 0 {
             code = self.get_bits(1);
             self.move_pointer(code as u16);
         }
+
+        self.size
     }
 
-    fn init_buffer(&mut self) {
-        self.buffer =   ((self.data[self.data_pointer] as u64) << 56) |
-                        ((self.data[self.data_pointer + 1] as u64) << 48) |
-                        ((self.data[self.data_pointer + 2] as u64) << 40) |
-                        ((self.data[self.data_pointer + 3] as u64) << 32) |
-                        ((self.data[self.data_pointer + 4] as u64) << 24) |
-                        ((self.data[self.data_pointer + 5] as u64) << 16) |
-                        ((self.data[self.data_pointer + 6] as u64) << 8) |
-                        self.data[self.data_pointer + 7] as u64;
-        self.data_pointer += 8;
+    pub fn init_buffer(&mut self) {
+        let n = if self.data.len() < 8 { self.data.len() } else { 8 };
+
+        for i in 0..n {
+            self.buffer |= (self.data[i] as u64) << (56 - i*8);
+        };
+
+        self.data_pointer += n;
     }
 
     fn get_bits(&mut self, n_bits: u8) -> u32 {
@@ -145,24 +201,36 @@ impl<'a> Decoder<'a> {
             panic!("can get at most 4 byte at a time");
         }
 
-        let mut mask = 0x8000000000000000u64;
-        for i in 1..n_bits {
-            mask |= (mask >> i)
+        if n_bits == 0 {
+            panic!("must get nonzero amount of bits");
         }
+
+        let mask = MASK[n_bits as usize - 1];
 
         let return_val = ((self.buffer & mask) >> (64 - n_bits)) as u32;
-        self.buffer <<= n_bits as u32;
-
-        //println!("trailing: {} {} {}", self.trailing, self.data_pointer, self.data.len());
-        self.trailing += n_bits as u16;
-
-        while (self.trailing >= 8) & (self.data_pointer < self.data.len()) {
-            self.buffer |= ((self.data[self.data_pointer] as u64) << (self.trailing - 8) as u64);
-            self.data_pointer += 1;
-            self.trailing -= 8;
-        }
+        self.move_buffer(n_bits as u64);
 
         return_val
+    }
+
+    pub fn set_chroma_ac(&mut self) {
+        self.table = Table::Ca;
+        self.pointer = self.ca_tree.get(0, 0).clone();
+    }
+
+    pub fn set_chroma_dc(&mut self) {
+        self.table = Table::Cd;
+        self.pointer = self.cd_tree.get(0, 0).clone();
+    }
+
+    pub fn set_luma_ac(&mut self) {
+        self.table = Table::La;
+        self.pointer = self.la_tree.get(0, 0).clone();
+    }
+
+    pub fn set_luma_dc(&mut self) {
+        self.table = Table::Ld;
+        self.pointer = self.ld_tree.get(0, 0).clone();
     }
 
     pub fn move_pointer(&mut self, direction: u16) {
@@ -173,20 +241,9 @@ impl<'a> Decoder<'a> {
                 self.size = v;
 
                 match self.table {
-                    Table::Ld => {
-                        self.table = Table::La;
-                        self.pointer = self.la_tree.get(0, 0).clone();
-                    },
-                    Table::La => {
-                        self.pointer = self.la_tree.get(0, 0).clone();
-                    },
-                    Table::Cd => {
-                        self.table = Table::Ca;
-                        self.pointer = self.ca_tree.get(0, 0).clone();
-                    },
-                    Table::Ca => {
-                        self.pointer = self.ca_tree.get(0, 0).clone();
-                    },
+                    Table::Ld => self.set_luma_ac(),
+                    Table::La => self.set_luma_ac(),
+                    _ => self.set_chroma_ac(),
                 }
             },
             Tree::None => panic!("invalid code"),
@@ -197,6 +254,7 @@ impl<'a> Decoder<'a> {
 
 fn prepare_lookup_table(table: &Vec<(u8, u16)>)
     -> Vec<(u8, u16, Rc<Box<Tree<u8>>>)> {
+
     let mut scv = Vec::with_capacity(table.len());
 
     for (i, value) in table.iter().enumerate() {
@@ -212,7 +270,8 @@ fn decode_value(size: u8, value: u32) -> i32 {
     let positive_mask = 1 << (size - 1);
 
     if value & positive_mask == 0 {
-        - ((!value & (0xFF >> 8 - size)) as i32) // negative value
+        let x = if size == 0 { 0x0000 } else {(0xFFFF >> (16 - size))};
+        - ((!value & x) as i32) // negative value
     } else {
         value as i32 // positive value
     }

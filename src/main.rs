@@ -14,9 +14,9 @@ mod util;
 mod xinterface;
 
 fn main () {
-    let width = 640u32;
+    let width = 16u32;
     let offset_x = 0;
-    let height = 368u32;
+    let height = 16u32;
     let offset_y = 0;
     let raw_bbp = 4;
 
@@ -26,11 +26,6 @@ fn main () {
     let frame_duration = Duration::new(0, fr as u32);
 
     let mut encoder = encoder::Encoder::new(width as isize, height as isize, raw_bbp);
-  //  let mut decoder = decoder::Decoder::new();
-  //  decoder.move_pointer(0);
-   // decoder.move_pointer(1);
-    //decoder.move_pointer(0);
-    //decoder.move_pointer(1);
     let mut context = context::Context::new(width, offset_x, height, offset_y);
 
     let _ = encoder.initial_encode_rgb(&context);
@@ -41,7 +36,7 @@ fn main () {
     let mut decoder = decoder::Decoder::new(&sn);
     decoder.decode();
 
-    let n = 24;
+    let n = 0;
     let mut sizes = Vec::with_capacity(n);
     let mut times = Vec::with_capacity(n);
 
@@ -64,7 +59,7 @@ fn main () {
         times.push(t5.elapsed().unwrap().subsec_nanos() as f64 / 1000000000f64);
     }
 
-    let t4 = t4.elapsed().unwrap();
+    /*let t4 = t4.elapsed().unwrap();
     //let _ = context.store_client_state();
 
 
@@ -81,9 +76,10 @@ fn main () {
     let mbit = mbit_data(&sizes, 24);
     let av_mb = av(&mbit);
     let std_mb = std(&mbit, av_mb);
-    println!("{} pm {} mbps", av_mb, std_mb);
+    println!("{} pm {} mbps", av_mb, std_mb);*/
 
     context.close();
+    println!("");
 }
 
 fn av(values: &Vec<f64>) -> f64 {

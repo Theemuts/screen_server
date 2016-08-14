@@ -19,7 +19,7 @@ impl Sink {
     }
 
     pub fn get(&self) -> Vec<u8> {
-        self.data[1].clone()
+        self.data[0].clone()
     }
 
     pub fn write(&mut self, byte: u8) {
@@ -27,10 +27,20 @@ impl Sink {
     }
 
     pub fn new_block(&mut self, block: usize) {
-        self.buffer.shrink_to_fit();
-        self.data.push(self.buffer.clone());
+        if self.buffer.len() > 0 {
+            self.buffer.shrink_to_fit();
+            self.data.push(self.buffer.clone());
+        }
+
         self.buffer = Vec::with_capacity(self.subpixels_per_macroblock);
         self.blocks.push(block);
+    }
+
+    pub fn push_final_block(&mut self) {
+        if self.buffer.len() > 0 {
+            self.buffer.shrink_to_fit();
+            self.data.push(self.buffer.clone());
+        }
     }
 
     pub fn clear(&mut self) {
