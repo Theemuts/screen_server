@@ -2,7 +2,7 @@
 pub struct Sink {
     n_blocks: usize,
     subpixels_per_macroblock: usize,
-    data: Vec<Vec<u8>>,
+    pub data: Vec<Vec<u8>>,
     buffer: Vec<u8>,
     blocks: Vec<usize>
 }

@@ -14,9 +14,9 @@ mod util;
 mod xinterface;
 
 fn main () {
-    let width = 16u32;
+    let width = 640u32;
     let offset_x = 0;
-    let height = 16u32;
+    let height = 368u32;
     let offset_y = 0;
     let raw_bbp = 4;
 
@@ -33,15 +33,17 @@ fn main () {
 
     let sn = encoder.sink.get();
     println!("SN: {}", sn.len());
-    let mut decoder = decoder::Decoder::new(&sn);
-    decoder.decode();
+    let mut decoder = decoder::Decoder::new();
 
-    let n = 0;
-    let mut sizes = Vec::with_capacity(n);
-    let mut times = Vec::with_capacity(n);
+    //let n = 0;
+    //let mut sizes = Vec::with_capacity(n);
+    //let mut times = Vec::with_capacity(n);
 
     let t4 = SystemTime::now();
-    let mut t5;
+    for _ in 0..10000 {
+        decoder.decode(&encoder.sink);
+    }
+    /*let mut t5;
     let mut sent;
 
     for _ in 0..n {
@@ -57,13 +59,14 @@ fn main () {
         }
 
         times.push(t5.elapsed().unwrap().subsec_nanos() as f64 / 1000000000f64);
-    }
+    }*/
 
-    /*let t4 = t4.elapsed().unwrap();
+    let t4 = t4.elapsed().unwrap();
+    println!("{:?}", t4);
     //let _ = context.store_client_state();
 
 
-    let av_s = av(&sizes);
+    /*let av_s = av(&sizes);
     let std_s = std(&sizes, av_s);
     let framerate = framerate(&times);
     let av_f = av(&framerate);

@@ -6,8 +6,8 @@ pub enum Tree<T> {
     None,
     Leaf(T),
     Node {
-        left: Rc<Box<Tree<T>>>,
-        right: Rc<Box<Tree<T>>>,
+        left: Rc<Tree<T>>,
+        right: Rc<Tree<T>>,
     },
 }
 
@@ -45,8 +45,8 @@ impl<T: Copy + Debug> Tree<T> {
     }
 
     // TODO: avoid excessive cloning
-    pub fn generate_tree(size_code_value: &Vec<(u8, u16, Rc<Box<Tree<T>>>)>)
-        -> Rc<Box<Tree<T>>> {
+    pub fn generate_tree(size_code_value: &Vec<(u8, u16, Rc<Tree<T>>)>)
+        -> Rc<Tree<T>> {
         let mut sc = size_code_value.clone();
 
         // Repeatedly merge adjacent nodes until one element remains: the tree itself.
@@ -59,8 +59,8 @@ impl<T: Copy + Debug> Tree<T> {
         sc[0].2.clone()
     }
 
-    fn merge_adjacent(size_code_value: &mut Vec<(u8, u16, Rc<Box<Tree<T>>>)>)
-        -> Vec<(u8, u16, Rc<Box<Tree<T>>>)> {
+    fn merge_adjacent(size_code_value: &mut Vec<(u8, u16, Rc<Tree<T>>)>)
+        -> Vec<(u8, u16, Rc<Tree<T>>)> {
         let mut new_size_code_value = Vec::with_capacity(size_code_value.len());
 
         // Sort (size, code, value)-vector. Largest size first, then largest code first.
@@ -76,10 +76,10 @@ impl<T: Copy + Debug> Tree<T> {
         while let Some(current) = iter.next() {
             // If they are adjacent and belong to the same node, merge
             if (previous.0 == current.0) & (previous.1 & 1 == 1) & ((previous.1 as i32 - current.1 as i32) == 1) {
-                node = Rc::new(Box::new(Tree::Node {
+                node = Rc::new(Tree::Node {
                     left: previous.2,
                     right: current.2.clone()
-                }));
+                });
 
                 // Increment merge counter, set merged as new previous
                 merged += 1;
@@ -101,15 +101,15 @@ impl<T: Copy + Debug> Tree<T> {
         // Using first element is safe because sort order has not changed.
         if merged == 0 {
             node = if new_size_code_value[0].1 & 1 == 1 {
-                Rc::new(Box::new(Tree::Node {
+                Rc::new(Tree::Node {
                     left: new_size_code_value[0].2.clone(),
-                    right: Rc::new(Box::new(Tree::None))
-                }))
+                    right: Rc::new(Tree::None)
+                })
             } else {
-                Rc::new(Box::new(Tree::Node {
-                    left: Rc::new(Box::new(Tree::None)),
+                Rc::new(Tree::Node {
+                    left: Rc::new(Tree::None),
                     right: new_size_code_value[0].2.clone()
-                }))
+                })
             };
 
             new_size_code_value[0].0 -= 1;

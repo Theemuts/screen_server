@@ -5,7 +5,7 @@ fbe7a0c5dd90a69a3eb2bd18edd583f2156aa08f/src/jpeg/encoder.rs
 */
 
 mod fdct;
-mod sink;
+pub mod sink;
 
 use self::fdct::fdct;
 use self::sink::Sink;
@@ -99,7 +99,6 @@ impl Encoder {
                     for i in 0..2 {
                         x = x0 + 8*i;
                         y = y0 + 8*j;
-                        // just base this on initial index.
                         let index = self.bpp * (y * self.width + x);
                         copy_blocks_ycbcr(data, index, self.width, self.bpp, self.size, &mut yblock, &mut cb_block, &mut cr_block);
 
@@ -116,27 +115,26 @@ impl Encoder {
                             dct_cr_block[k] = ((dct_cr_block[k] / 8) as f32 / self.tables[64..][k] as f32).round() as i32;
                         }
 
-                        if (i == 0) & (j == 0) {
-                            for k in 0..64 {
-                                if (k%8) == 0 {println!("");}
-                                print!("{}, ", dct_yblock[k]);
-                            }
-                            println!("");
-                            for k in 0..64 {
-                                if (k%8) == 0 {println!("");}
-                                print!("{}, ", dct_cb_block[k]);
-                            }
-                            println!("");
-                            for k in 0..64 {
-                                if (k%8) == 0 {println!("");}
-                                print!("{}, ", dct_cr_block[k]);
-                            }
+                        // print for now for debugging purposes
+                        /*for k in 0..64 {
+                            if (k%8) == 0 {println!("");}
+                            print!("{}, ", dct_yblock[k]);
                         }
                         println!("");
+                        for k in 0..64 {
+                            if (k%8) == 0 {println!("");}
+                            print!("{}, ", dct_cb_block[k]);
+                        }
+                        println!("");
+                        for k in 0..64 {
+                            if (k%8) == 0 {println!("");}
+                            print!("{}, ", dct_cr_block[k]);
+                        }
+                        println!("");*/
 
-                            self.write_block(&dct_yblock, &ld, &la);
-                            self.write_block(&dct_cb_block, &cd, &ca);
-                            self.write_block(&dct_cr_block, &cd, &ca);
+                        self.write_block(&dct_yblock, &ld, &la);
+                        self.write_block(&dct_cb_block, &cd, &ca);
+                        self.write_block(&dct_cr_block, &cd, &ca);
 
                     }
                 }
@@ -235,72 +233,6 @@ impl Encoder {
         self.write_bits(code, size)
     }
 
-    fn write_logged(&mut self,
-                    block: &[i32],
-                    dctable: &[(u8, u16)],
-                    actable: &[(u8, u16)]) -> i32
-    {
-        // Differential DC encoding
-        let dcval = block[0];
-        let diff  = dcval;
-        let (size, value) = encode_coefficient(diff);
-
-        self.huffman_encode(size, dctable);
-        let (sz, code) = dctable[size as usize];
-        //println!("ori: {}", diff);
-        //println!("cod: {:b}, sz: {}", code, sz);
-        //println!("val: {:b}, sz: {}", value, size);
-       // println!("");
-        self.write_bits(value, size);
-
-        // Figure F.2
-        let mut zero_run = 0;
-        let mut k = 0usize;
-
-        loop {
-            k += 1;
-
-            if block[UNZIGZAG[k] as usize] == 0 {
-                if k == 63 {
-                    // Final element
-                    // . Write f(0x00) to indicate end of block
-                    //println!("zr: {:?}", actable[0x00]);
-                    self.huffman_encode(0x00, actable);
-                    break
-                }
-
-                zero_run += 1;
-            } else {
-                while zero_run > 15 {
-                    // Write f(0xF0) for every 16 consecutive zeros
-                    self.huffman_encode(0xF0, actable);
-                    zero_run -= 16;
-                }
-
-                let (size, value) = encode_coefficient(block[UNZIGZAG[k] as usize]);
-                let symbol = (zero_run << 4) | size;
-
-                self.huffman_encode(symbol, actable);
-                self.write_bits(value, size);
-
-                let (sz, code) = actable[symbol as usize];
-                //println!("zero_run: {}, size: {}, ori: {}", zero_run, size, symbol);
-                //println!("zero_run: {}, size: {}, ori: {}", (symbol & 0xF0) >> 4, size & 0x0F, symbol);
-                //println!("cod: {:b}, sz: {}", code, sz);
-                //println!("val: {:b}, sz: {}", value, size);
-                //println!("");
-
-                zero_run = 0;
-
-                if k == 63 {
-                    break
-                }
-            }
-        }
-
-        dcval
-    }
-
     fn write_block(
         &mut self,
         block: &[i32],
@@ -360,11 +292,9 @@ impl Encoder {
             return
         }
 
-        //println!("{s} {number:>0width$b}", number = bits, width = size as usize, s = size);
-        //println!("{number:>0width$b}", number = self.accumulator, width = 32);
-        self.accumulator |= (bits as u32) << (32 - (self.nbits + size)) as usize;
-        //println!("{number:>0width$b}", number = self.accumulator, width = 32);
+        //println!("{size} {number:>0width$b}", number=bits, width=size as usize, size=size);
 
+        self.accumulator |= (bits as u32) << (32 - (self.nbits + size)) as usize;
         self.nbits += size;
 
         while self.nbits >= 8 {
@@ -373,9 +303,6 @@ impl Encoder {
             self.sink.write(byte as u8);
             self.nbits -= 8;
             self.accumulator <<= 8;
-
-            //println!("{number:>0width$b}", number = byte as u8, width = 8);
-            //println!("{number:>0width$b}", number = self.accumulator, width = 32);
 
         }
     }
