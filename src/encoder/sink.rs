@@ -1,10 +1,12 @@
 #[derive(Debug)]
+
+// TODO: use UDP socket as sink rather than this...
 pub struct Sink {
     n_blocks: usize,
     subpixels_per_macroblock: usize,
     pub data: Vec<Vec<u8>>,
     buffer: Vec<u8>,
-    blocks: Vec<usize>
+    pub blocks: Vec<usize>
 }
 
 impl Sink {
@@ -18,8 +20,14 @@ impl Sink {
         }
     }
 
-    pub fn get(&self) -> Vec<u8> {
-        self.data[0].clone()
+    pub fn get(&self) -> Vec<(usize, Vec<u8>)> {
+        let mut result = Vec::with_capacity(self.data.len());
+
+        for i in 0..self.data.len() {
+            result.push((self.blocks[i], self.data[i].clone()));
+        }
+
+        result
     }
 
     pub fn write(&mut self, byte: u8) {

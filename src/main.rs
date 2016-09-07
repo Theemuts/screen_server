@@ -3,7 +3,6 @@
 extern crate x11;
 extern crate num_iter;
 
-use std::time::{SystemTime, Duration};
 
 mod context;
 mod decoder;
@@ -12,6 +11,9 @@ mod entropy;
 mod tables;
 mod util;
 mod xinterface;
+mod udp;
+
+use std::time::{SystemTime, Duration};
 
 fn main () {
     let width = 640u32;
@@ -20,33 +22,37 @@ fn main () {
     let offset_y = 0;
     let raw_bbp = 4;
 
-    //divide fr by 1.003, result is closer to wanted framerate.
-    let mut fr = 24u64;
+    let mut fr = 10u64;
     fr = 1_000_000_000_000u64 / (1003u64 * fr);
     let frame_duration = Duration::new(0, fr as u32);
 
-    let mut encoder = encoder::Encoder::new(width as isize, height as isize, raw_bbp);
-    let mut context = context::Context::new(width, offset_x, height, offset_y);
+    // Init UDP sockets
+    let (data_channel, packet_ack_channel) = udp::Udp::init_udp_sockets();
+
+    //divide fr by 1.003, result is closer to wanted framerate.
+
+    let mut encoder = encoder::Encoder::new(width as isize,
+                                            height as isize,
+                                            raw_bbp,
+                                            data_channel);
+    let mut context = context::Context::new(width, offset_x, height, offset_y, packet_ack_channel);
 
     let _ = encoder.initial_encode_rgb(&context);
-    println!("Initial size: {}", encoder.sink_size());
+    let mut decoder = decoder::Decoder::new(width as usize, height as usize);
 
-    let sn = encoder.sink.get();
-    println!("SN: {}", sn.len());
-    let mut decoder = decoder::Decoder::new();
-
-    //let n = 0;
-    //let mut sizes = Vec::with_capacity(n);
-    //let mut times = Vec::with_capacity(n);
+    let n = 10000;
+    let mut sizes = Vec::with_capacity(n);
+    let mut times = Vec::with_capacity(n);
 
     let t4 = SystemTime::now();
-    for _ in 0..10000 {
+    for _ in 0..1 {
         decoder.decode(&encoder.sink);
     }
-    /*let mut t5;
+    let mut t5;
     let mut sent;
 
     for _ in 0..n {
+        context.handle_ack();
         t5 = SystemTime::now();
         context.get_new_screenshot();
         context.set_block_errors();
@@ -59,11 +65,11 @@ fn main () {
         }
 
         times.push(t5.elapsed().unwrap().subsec_nanos() as f64 / 1000000000f64);
-    }*/
+    }
 
     let t4 = t4.elapsed().unwrap();
-    println!("{:?}", t4);
-    //let _ = context.store_client_state();
+    //println!("{:?}", t4);
+    let _ = context.store_client_state();
 
 
     /*let av_s = av(&sizes);

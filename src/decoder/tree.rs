@@ -19,17 +19,25 @@ impl<T: Copy + Debug> Tree<T> {
         }
     }
 
-    pub fn get(&self, size: u8, code: u16) -> &Tree<T> {
+    pub fn get(&self, size: u8, code: u16) -> Rc<Tree<T>> {
         if size > 16 {
             panic!("invalid code length");
         }
 
         match self {
             &Tree::Node { left: ref l, right: ref r } => {
-                if size == 0 { return self }
+                //if size == 0 { return self }
 
                 let head = 0x8000 >> (16 - size) as u16; // first bit in code
                 let trailing = if size > 1 { 0xFFFF >> (17 - size) as u16} else { 0u16 }; // trailing bits in code
+
+                if size == 1 {
+                    if code & head == 0 {
+                        return r.clone()
+                    } else {
+                        return l.clone()
+                    }
+                }
 
                 if (code & head) >> (size - 1) as u16 == 1 {
                     l.get(size - 1, code & trailing)
@@ -38,8 +46,7 @@ impl<T: Copy + Debug> Tree<T> {
                 }
             },
             _ => {
-                if size != 0 { panic!("Invalid code used") }
-                self
+                panic!("Invalid code used")
             },
         }
     }

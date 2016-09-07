@@ -7,6 +7,9 @@ use std::io::prelude::*;
 use std::io::BufWriter;
 use std::fs::File;
 
+use std::sync::mpsc::Receiver;
+
+
 use num_iter::range_step;
 
 #[derive(Debug)]
@@ -30,11 +33,12 @@ pub struct Context {
     n_blocks_x: u32,
     n_blocks_y: u32,
     pub errors: Vec<(i64, usize)>,
-    block_table: Vec<usize>
+    block_table: Vec<usize>,
+    ack_channel: Receiver<Vec<u16>>
 }
 
 impl Context {
-    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32) -> Self {
+    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32, ack_channel: Receiver<Vec<u16>>) -> Self {
         if (height % 16 != 0) | (width % 16 != 0) {
             panic!("height and width must be divisible by 16")
         }
@@ -68,7 +72,8 @@ impl Context {
             n_blocks_x: n_blocks_x,
             n_blocks_y: n_blocks_y,
             errors: vec![(0i64, 0usize); n_blocks],
-            block_table: vec![0usize; (width*height) as usize]
+            block_table: vec![0usize; (width*height) as usize],
+            ack_channel: ack_channel
         };
 
         c.generate_block_lookup_table();
@@ -208,21 +213,16 @@ impl Context {
     }
 
     pub fn update_client_state(&mut self, blocks_to_update: usize) {
-        let data = get_data(self.image_pointer);
+        let mut r;
+        let mut g;
+        let mut b;
+        let mut dest_ind;
 
-        let blocks_x = if self.width % 16 == 0 {
-            self.width as isize / 16
-        } else {
-            (self.width as isize + 8)/16
-        };
+        let data = get_data(self.image_pointer);
+        let blocks_x = self.width as isize / 16;
 
         for i in 0..blocks_to_update {
             let (_, block) = self.errors[i];
-
-            let mut r;
-            let mut g;
-            let mut b;
-            let mut dest_ind;
 
             // Calculate initial index
             let x_block = block as isize % blocks_x;
@@ -245,6 +245,21 @@ impl Context {
                     self.client_state[dest_ind] = r;
                     self.client_state[dest_ind+1] = g;
                     self.client_state[dest_ind+2] = b;
+                }
+            }
+        }
+    }
+
+    pub fn handle_ack(&self) {
+        loop {
+            match self.ack_channel.try_recv() {
+                Ok(data) => {
+                    println!("Received ack: {:?}", data);
+                    ()
+                },
+                Err(e) => {
+                    // No more acks to handle
+                    return
                 }
             }
         }

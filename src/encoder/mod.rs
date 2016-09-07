@@ -13,6 +13,10 @@ use super::context::Context;
 use super::entropy::build_huff_lut;
 use super::tables::*;
 use super::util::get_data;
+use super::udp::SenderMessage;
+
+
+use std::sync::mpsc::Sender;
 
 use num_iter::range_step;
 
@@ -29,15 +33,23 @@ pub struct Encoder {
     bpp: isize,
     macroblock_size: isize,
 
+    udp_channel: Sender<SenderMessage>,
+
     accumulator: u32,
     nbits: u8,
+
+    buffer: Vec<u8>,
 
     size_accumulator: u64,
     pub sink: Sink
 }
 
 impl Encoder {
-    pub fn new(width: isize, height: isize, bpp: isize) -> Self {
+    pub fn new(width: isize,
+               height: isize,
+               bpp: isize,
+               sender: Sender<SenderMessage>) -> Self
+    {
         let ld = build_huff_lut(&STD_LUMA_DC_CODE_LENGTHS, &STD_LUMA_DC_VALUES);
         let la = build_huff_lut(&STD_LUMA_AC_CODE_LENGTHS, &STD_LUMA_AC_VALUES);
 
@@ -62,6 +74,10 @@ impl Encoder {
             accumulator: 0,
             size_accumulator: 0,
             nbits: 0,
+
+
+            buffer: Vec::with_capacity(768),
+            udp_channel: sender,
 
             sink: Sink::new((height*width/256) as usize, 768) // 16*16*3 subpixels per macroblock
         }
@@ -91,9 +107,8 @@ impl Encoder {
 
         for y0 in range_step(0, self.height, self.macroblock_size) {
             for x0 in range_step(0, self.width, self.macroblock_size) {
-                // RGB -> YCbCr
-
                 self.sink.new_block(bl);
+                self.write_bits(bl as u16, 10);
 
                 for j in 0..2 {
                     for i in 0..2 {
@@ -115,35 +130,28 @@ impl Encoder {
                             dct_cr_block[k] = ((dct_cr_block[k] / 8) as f32 / self.tables[64..][k] as f32).round() as i32;
                         }
 
-                        // print for now for debugging purposes
-                        /*for k in 0..64 {
-                            if (k%8) == 0 {println!("");}
-                            print!("{}, ", dct_yblock[k]);
-                        }
-                        println!("");
-                        for k in 0..64 {
-                            if (k%8) == 0 {println!("");}
-                            print!("{}, ", dct_cb_block[k]);
-                        }
-                        println!("");
-                        for k in 0..64 {
-                            if (k%8) == 0 {println!("");}
-                            print!("{}, ", dct_cr_block[k]);
-                        }
-                        println!("");*/
-
                         self.write_block(&dct_yblock, &ld, &la);
                         self.write_block(&dct_cb_block, &cd, &ca);
                         self.write_block(&dct_cr_block, &cd, &ca);
 
+
                     }
                 }
-                bl += 1;
                 self.write_final_bits();
+
+                if self.buffer.len() > 0 {
+                    self.buffer.shrink_to_fit();
+                    self.udp_channel.send(SenderMessage::Macroblock(self.buffer.clone()));
+                    self.buffer = Vec::with_capacity(768);
+                }
+
+                bl += 1;
             }
         }
 
+        self.udp_channel.send(SenderMessage::EndOfData);
         self.sink.push_final_block();
+
     }
 
     pub fn sink_size(&self) -> f64 {
@@ -152,6 +160,7 @@ impl Encoder {
 
     pub fn update_encode_rgb(&mut self, context: &Context) -> usize {
         let data = get_data(context.image_pointer);
+        self.udp_channel.send(SenderMessage::IncrementTimestamp);
 
         self.sink.clear();
         let mut sent = 0;
@@ -176,25 +185,24 @@ impl Encoder {
                 // TODO: don't add zero-error blocks to the error vec?
                 break
             }
+
+            //println!("Block: {}", block);
             self.sink.new_block(block);
+            self.write_bits(block as u16, 10);
 
             // Speed up with lookup table?
 
-            let n_blocks_x: isize = if self.width % self.macroblock_size == 0 {
-                self.width / self.macroblock_size
-            } else {
-                (self.width+8) / self.macroblock_size
-            };
+            let n_blocks_x = self.width / self.macroblock_size;
 
             // Todo: find out why n errors sent stays constant rather than go to 0 when video playback paused.
 
-            let block_mod: isize = block as isize % n_blocks_x;
-            let x0: isize = 64*block_mod;
-            let y0: isize = (block as isize - block_mod)/n_blocks_x;
+            let x0 = (block as isize % n_blocks_x) * 16;
+            let y0 = (block as isize / n_blocks_x) * 16;
+
 
             for y in range_step(y0, y0+16, 8) {
-                for x in range_step(x0, x0+64, 32) { // 2 * 4 * 8
-                    let index = self.bpp * y * self.width + x;
+                for x in range_step(x0, x0+16, 8) { // 2 * 4 * 8
+                    let index = self.bpp * (y * self.width + x);
                     copy_blocks_ycbcr(data, index, self.width, self.bpp, self.size, &mut yblock, &mut cb_block, &mut cr_block);
 
                     // Level shift and fdct
@@ -217,9 +225,17 @@ impl Encoder {
             }
 
             self.write_final_bits();
+
+            if self.buffer.len() > 0 {
+                self.buffer.shrink_to_fit();
+                self.udp_channel.send(SenderMessage::Macroblock(self.buffer.clone()));
+                self.buffer = Vec::with_capacity(768);
+            }
+
             sent += 1;
         }
 
+        self.udp_channel.send(SenderMessage::EndOfData);
         sent
     }
 
@@ -242,10 +258,16 @@ impl Encoder {
         // Differential DC encoding
         let dcval = block[0];
         let diff  = dcval;
+        //println!("write_block_dc");
         let (size, value) = encode_coefficient(diff);
+        //println!("write_block: oldInBlockIndex: 0, newInBlockIndex: 1, isZero: {}", size == 0);
 
+        //println!("write_block: huffman_encoded_symbol");
         self.huffman_encode(size, dctable);
+        //println!("write_block: write_encoded_value");
         self.write_bits(value, size);
+
+        let mut index = 0;
 
         // Figure F.2
         let mut zero_run = 0;
@@ -258,23 +280,45 @@ impl Encoder {
                 if k == 63 {
                     // Final element
                     // . Write f(0x00) to indicate end of block
+
+                    ////println!("write_block: end_of_block");
+
                     self.huffman_encode(0x00, actable);
                     break
                 }
 
                 zero_run += 1;
             } else {
+                //println!("write_block_ac");
+
                 while zero_run > 15 {
                     // Write f(0xF0) for every 16 consecutive zeros
+                    //println!("write_block: consec_zeros");
+
                     self.huffman_encode(0xF0, actable);
                     zero_run -= 16;
+                    index += 16;
                 }
 
                 let (size, value) = encode_coefficient(block[UNZIGZAG[k] as usize]);
                 let symbol = (zero_run << 4) | size;
 
+                index += zero_run + 1;
+
+                //println!("write_block: inBlockIndexInitial: {}, \
+                //          isZero: false, \
+                //          huffCodeLength: {} \
+                //          symbol: {}, \
+                //          zeroRunRes: {} \
+                //          inBlockIndexAfter: {}", index - zero_run, size, symbol, zero_run,  index);
+
+                //println!("write_block: huff_enc");
                 self.huffman_encode(symbol, actable);
+                //println!("write_block: wr_val");
                 self.write_bits(value, size);
+                                                       //41
+                //00000000 00110010 01110111 00011110 11011001 00100100 11110000 00000000 10101000 00011010 01010111 00100000 10001111 01001100 10010101 10010011 00101111 00110010 10100011 01111111 01110111 01101110 11101111 11010111 00110101 11001100 11101011 00101110 10000111 01100100 01110000 10010010 01101011 01010110 01100100 11011011 00111000 01011011 10101000 10001001 11101000 00011011 11111010 01110001 01011000 11010101 10111111 00100011 10110001 10111110 00011110 11011110 11010101 01011100 10001010 01100011 00101011 10111110 01010000 10010000 00110001 11110011 00001101 11011000 11011101 11101100 00111101 00001111 10111111 11111001 00011110 01111100 00100100 10101101 10101001 11101100 11010101 10001100 10101111 11101110 11111100 11111111 11100000 00000000
+                //00000000 00110010 01110111 00011110 11011001 00100100 11110000 00000000 10101000 00011010 01010111 00100000 10001111 01001100 10010101 10010011 00101111 00110010 10100011 01111111 01110111 01101110 11101111 11010111 00110101 11001100 11101011 00101110 10000111 01100100 01110000 10010010 01101011 01010110 01100100 11011011 00111000 01011011 10101000 10001001 11101000 00011011 11111010 01110001 01011000 11010101 10111111 00100011 10110001 10111110 00011110 11011110 11010101 01011100 10001010 01100011 00101011 10111110 01010000 10010000 00110001 11110011 00001101 11011000 11011101 11101100 00111101 00001111 10111111 11111001 00011110 01111100 00100100 10101101 10101001 11101100 11010101 10001100 10101111 11101110 11111100 11111111 11100000 00000000
 
                 zero_run = 0;
 
@@ -292,7 +336,7 @@ impl Encoder {
             return
         }
 
-        //println!("{size} {number:>0width$b}", number=bits, width=size as usize, size=size);
+        //println!("write_bits: {size} {number:>0width$b}", number=bits, width=size as usize, size=size);
 
         self.accumulator |= (bits as u32) << (32 - (self.nbits + size)) as usize;
         self.nbits += size;
@@ -301,10 +345,13 @@ impl Encoder {
             let byte = (self.accumulator & 0xFF000000u32) >> 24;
 
             self.sink.write(byte as u8);
+            self.buffer.push(byte as u8);
             self.nbits -= 8;
             self.accumulator <<= 8;
 
         }
+
+        //println!("write_bits: trailing: {}", self.nbits)
     }
 
     fn write_final_bits(&mut self) {
@@ -316,6 +363,7 @@ impl Encoder {
         while self.nbits >= 8 {
             let byte = (self.accumulator & (0xFFFFFFFFu32 << 24)) >> 24;
             self.sink.write(byte as u8);
+            self.buffer.push(byte as u8);
 
             self.nbits -= 8;
             self.accumulator <<= 8;
@@ -324,9 +372,11 @@ impl Encoder {
         if self.nbits != 0 {
             let byte = (self.accumulator & (0xFFFFFFFFu32 << 24)) >> 24;
             self.sink.write(byte as u8);
+            self.buffer.push(byte as u8);
 
             if byte == 0xFF {
                 self.sink.write(0x00);
+                self.buffer.push(0x00);
             }
         }
 
@@ -348,9 +398,11 @@ fn copy_blocks_ycbcr(source: *mut i8,
         for x in 0isize..8 {
             let ind = index + (y * width + x) * bpp;
 
+
             let b = value_at(source, ind, size);
             let g = value_at(source, ind + 1, size);
             let r = value_at(source, ind + 2, size);
+
 
             let (yc, cb, cr) = rgb_to_ycbcr(r, g, b);
 
@@ -362,6 +414,7 @@ fn copy_blocks_ycbcr(source: *mut i8,
 }
 
 fn encode_coefficient(coefficient: i32) -> (u8, u16) {
+    //println!("encode_coefficient: {}", coefficient);
     let mut magnitude = coefficient.abs() as u16;
     let mut num_bits  = 0u8;
 
