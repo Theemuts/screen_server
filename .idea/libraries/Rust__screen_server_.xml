@@ -1,11 +1,11 @@
 <component name="libraryTable">
   <library name="Rust &lt;screen_server&gt;">
     <CLASSES>
-      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.10.0-src.zip!/rust-1.10.0/src/libstd" />
-      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.10.0-src.zip!/rust-1.10.0/src/libcore" />
-      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.10.0-src.zip!/rust-1.10.0/src/libcollections" />
-      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.10.0-src.zip!/rust-1.10.0/src/liballoc" />
-      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.10.0-src.zip!/rust-1.10.0/src/librustc_unicode" />
+      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.12.0-src.zip!/rust-4db1874f4c26a2c88acb5e46b413e9c4adce3477/src/libstd" />
+      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.12.0-src.zip!/rust-4db1874f4c26a2c88acb5e46b413e9c4adce3477/src/libcore" />
+      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.12.0-src.zip!/rust-4db1874f4c26a2c88acb5e46b413e9c4adce3477/src/libcollections" />
+      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.12.0-src.zip!/rust-4db1874f4c26a2c88acb5e46b413e9c4adce3477/src/liballoc" />
+      <root url="jar://$USER_HOME$/rust-1.8.0/rust-1.12.0-src.zip!/rust-4db1874f4c26a2c88acb5e46b413e9c4adce3477/src/librustc_unicode" />
     </CLASSES>
     <JAVADOC />
     <SOURCES />

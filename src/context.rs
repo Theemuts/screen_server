@@ -1,16 +1,22 @@
 use super::xinterface;
 use super::x11::xlib;
-use super::util::get_data;
+use super::util::{get_data, DataBox};
+
+use std::fs::File;
 
 use std::io;
 use std::io::prelude::*;
 use std::io::BufWriter;
-use std::fs::File;
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Sender, Receiver, channel};
 
+use std::thread;
+
+use std::time::{SystemTime, Duration};
 
 use num_iter::range_step;
+
+use super::messages::{ContextMessage, EncoderMessage};
 
 #[derive(Debug)]
 pub struct Context {
@@ -32,13 +38,54 @@ pub struct Context {
     n_blocks: usize,
     n_blocks_x: u32,
     n_blocks_y: u32,
-    pub errors: Vec<(i64, usize)>,
+    errors: Vec<(i64, usize)>,
     block_table: Vec<usize>,
-    ack_channel: Receiver<Vec<u16>>
+    timestamp: u32,
+    current_version: Vec<u32>,
+    most_recent_version: Vec<u32>
+}
+
+pub fn start_context_thread(width: u32,
+                            offset_x: i32,
+                            height: u32,
+                            offset_y: i32,
+                            to_encoder: Sender<EncoderMessage>,
+                            receiver: Receiver<ContextMessage>)
+{
+
+    thread::spawn(move || {
+        let mut context = Context::new(width, offset_x, height, offset_y);
+
+        loop {
+            match receiver.recv() {
+                Ok(ContextMessage::Init) => {
+                    context.get_new_screenshot();
+                    context.set_initial_state();
+                    to_encoder.send(EncoderMessage::FirstImage(get_data(context.image_pointer)));
+                },
+                Ok(ContextMessage::Close) => {
+                    context.close();
+                    to_encoder.send(EncoderMessage::Close);
+                }
+                Ok(ContextMessage::NewScreenshot) => {
+                    context.get_new_screenshot();
+                    context.set_block_errors();
+                    context.update_client_state();
+                    let pnt = context.get_image_pointer();
+                    let msg = EncoderMessage::DataAndErrors(pnt, context.errors.clone());
+                    to_encoder.send(msg);
+                },
+                Ok(ContextMessage::AckPackets(timestamp, ids)) => {
+                    context.handle_ack(timestamp, &ids);
+                },
+                _ => panic!()
+            };
+        }
+    });
 }
 
 impl Context {
-    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32, ack_channel: Receiver<Vec<u16>>) -> Self {
+    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32) -> Self {
         if (height % 16 != 0) | (width % 16 != 0) {
             panic!("height and width must be divisible by 16")
         }
@@ -73,16 +120,21 @@ impl Context {
             n_blocks_y: n_blocks_y,
             errors: vec![(0i64, 0usize); n_blocks],
             block_table: vec![0usize; (width*height) as usize],
-            ack_channel: ack_channel
+            timestamp: 0,
+            current_version: vec![0u32; (n_blocks_x * n_blocks_y / 4) as usize],
+            most_recent_version: vec![0u32; (n_blocks_x * n_blocks_y / 4) as usize]
         };
 
         c.generate_block_lookup_table();
-        c.get_new_screenshot();
-        c.set_initial_state();
         c
     }
 
-    pub fn get_new_screenshot(&mut self) {
+    fn get_image_pointer(&self) -> DataBox {
+        get_data(self.image_pointer)
+    }
+
+    // TODO: return pointer
+    fn get_new_screenshot(&mut self) {
         // Delete old (is None if uninitialized)
         if let Some(im_pointer) = self.image_pointer {
             xinterface::destroy_image(im_pointer);
@@ -97,16 +149,16 @@ impl Context {
         self.image_pointer = Some(image);
     }
 
-    pub fn set_initial_state(&mut self) {
+    fn set_initial_state(&mut self) {
         xinterface::copy_image(self.image_pointer.unwrap(), &mut self.client_state, self.width, self.height);
     }
 
-    pub fn close(&self) {
+    fn close(&self) {
         xinterface::close_display(self.display);
     }
 
-    pub fn set_block_errors(&mut self) {
-        let data = get_data(self.image_pointer);
+    fn set_block_errors(&mut self) {
+        let DataBox(data) = get_data(self.image_pointer);
         // Define here for speed
         let mut r;
         let mut g;
@@ -124,6 +176,7 @@ impl Context {
         let it = (&self.block_table).iter().enumerate();
         let mut raw_ind;
         let mut state_ind;
+
 
         for (ind, block) in it {
             raw_ind = ind as isize * 4;
@@ -146,46 +199,6 @@ impl Context {
         self.errors.sort_by(|a, b| b.cmp(a));
     }
 
-    pub fn print_errors(&self) {
-        let mut zero = 0;
-        let mut max = 0;
-        let mut total = 0;
-        let mut var = 0;
-
-        let ref errors = self.errors;
-
-        for i in 0..errors.len() {
-            match errors[i].0 {
-                0 => zero += 1,
-                e if e > max => max = e,
-                _ => ()
-            }
-
-            total += errors[i].0
-        }
-
-        let av = total / errors.len() as i64;
-
-        for i in 0..errors.len() {
-            let mut add = errors[i].0 - av;
-            add *= add;
-            var += add;
-        }
-
-        for i in 0..10 {
-            let j = (((i + 1) * errors.len() / 10) - 1) as usize;
-            println!("{1}: {0}", errors[j].0, errors[j].1);
-        }
-
-        let std = f64::sqrt((var / errors.len() as i64) as f64);
-
-        println!("Zero: {}/{}", zero, errors.len());
-        println!("Max:  {}", max);
-        println!("Av:   {}", av);
-        println!("StD:  {}", std);
-        println!("nE:  {}", errors.len());
-    }
-
     fn generate_block_lookup_table(&mut self) {
         let macroblocks_x = (self.width / self.macroblock_size) as usize;
         let mut col;
@@ -201,7 +214,7 @@ impl Context {
         }
     }
 
-    pub fn store_client_state(&self) -> io::Result<()> {
+    fn store_client_state(&self) -> io::Result<()> {
         let mut buffer = BufWriter::new(try!(File::create("foo.txt")));
         for x in &self.client_state {
             try!(write!(buffer, "{} ", x));
@@ -212,17 +225,22 @@ impl Context {
         Ok(())
     }
 
-    pub fn update_client_state(&mut self, blocks_to_update: usize) {
+    fn update_client_state(&mut self) {
         let mut r;
         let mut g;
         let mut b;
         let mut dest_ind;
 
-        let data = get_data(self.image_pointer);
+        self.timestamp += 1;
+
+        let DataBox(data) = get_data(self.image_pointer);
         let blocks_x = self.width as isize / 16;
 
-        for i in 0..blocks_to_update {
-            let (_, block) = self.errors[i];
+        for err in &self.errors {
+            let (error, block) = *err;
+            if error == 0 { break }
+
+            self.most_recent_version[block] = self.timestamp;
 
             // Calculate initial index
             let x_block = block as isize % blocks_x;
@@ -250,17 +268,10 @@ impl Context {
         }
     }
 
-    pub fn handle_ack(&self) {
-        loop {
-            match self.ack_channel.try_recv() {
-                Ok(data) => {
-                    println!("Received ack: {:?}", data);
-                    ()
-                },
-                Err(e) => {
-                    // No more acks to handle
-                    return
-                }
+    fn handle_ack(&mut self, timestamp: u32, ids: &Vec<u16>) {
+        for id in ids {
+            if self.current_version[*id as usize] < timestamp {
+                self.current_version[*id as usize] = timestamp;
             }
         }
     }

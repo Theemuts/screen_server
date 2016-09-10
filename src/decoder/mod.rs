@@ -1,3 +1,4 @@
+/*
 mod ifdct;
 mod tree;
 
@@ -11,7 +12,6 @@ use std::fs::File;
 use self::tree::Tree;
 use super::entropy::build_huff_lut;
 use super::tables::*;
-use super::encoder::sink::Sink;
 
 #[derive(Debug)]
 pub struct Decoder {
@@ -483,3 +483,4 @@ fn index() {
     assert_eq!(get_index(4, 2, 64, 8), 4800);
     assert_eq!(get_index(4, 3, 64, 8), 4824);
 }
+*/

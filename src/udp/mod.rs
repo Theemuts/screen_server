@@ -5,6 +5,10 @@ use std::io::Result;
 
 use std::collections::HashMap;
 
+use std::time::{SystemTime, Duration};
+
+use super::messages::{SenderMessage, MainMessage, PendingAckMessage};
+
 const MAX_BUFFER_SIZE: usize = 1000;
 
 pub struct Udp {
@@ -13,80 +17,57 @@ pub struct Udp {
     buffer: Vec<u8>
 }
 
-#[derive(Debug)]
-pub enum SenderMessage {
-    EndOfData,
-    IncrementTimestamp,
-    Macroblock(Vec<u8>),
-    AcknowledgePackets(Vec<u32>),
+pub fn init_udp_sockets(pending_ack_sender: Sender<PendingAckMessage>,
+                        udp_sender_receiver: Receiver<SenderMessage>,
+                        main_sender: Sender<MainMessage>)
+{
+    // TODO: make sure client and server can communicate.
+
+    // Create the sender thread first. This will block until a handshake
+    // has been made.
+    Udp::start_sender_thread(pending_ack_sender.clone(), udp_sender_receiver, main_sender.clone());
+    Udp::start_receiver_thread(pending_ack_sender, main_sender);
 }
 
+
 impl Udp {
-    pub fn init_udp_sockets() -> (Sender<SenderMessage>, Receiver<Vec<u16>>) {
-        // We need to send messages between the sender and retriever thread to
-        // handle the acknowledgment of packets. The sender maintains a map of
-        // unacknowledged packets, with packet ids as the key and a vec of the
-        // blocks which are present in that packet.
-        let (to_receiver, from_sender): (Sender<Vec<u16>>, Receiver<Vec<u16>>) = channel();
-
-        // Create the sender thread first. This will block until a handshake
-        // has been made. Needs the to_receiver-end of the channel to send
-        // the list of blocks that can be updated to the receiver thread.
-        let to_sender = Self::start_a_sender_thread(to_receiver);
-
-        // With the to_sender-end of the channel, we create a receiver thread.
-        // This thread must send acknowledgements to the sender thread, and
-        // receive an id list in return.
-        let from_receiver = Self::start_a_receiver_thread(to_sender.clone(), from_sender);
-
-        // TODO: make sure client and server can communicate.
-
-        (to_sender, from_receiver)
-    }
-
-    fn start_a_sender_thread(to_receiver: Sender<Vec<u16>>)
-        -> Sender<SenderMessage>
+    fn start_sender_thread(to_pending_ack: Sender<PendingAckMessage>,
+                           udp_sender_receiver: Receiver<SenderMessage>,
+                           main_sender: Sender<MainMessage>)
     {
-        // Create a channel for communication with this thread
-        let (tx_data, rx_data): (Sender<SenderMessage>, Receiver<SenderMessage>) = channel();
-        // Create a channel to indicate the handshake has been successful.
-        let (tx_udp, rx_udp): (Sender<bool>, Receiver<bool>) = channel();
-
         // Spawn the sender thread.
         thread::spawn(move || {
             // The packet id is a 32 bit unsigned integer
-            let mut timestamp = 0u32;
-            let mut id = 0u32;
-
             // Create a buffer for sending data
-            let mut buffer = Vec::with_capacity(MAX_BUFFER_SIZE);
-
             // The vector of ids present in the current packet
+            let mut id = 0u32;
+            let mut buffer = Vec::with_capacity(MAX_BUFFER_SIZE);
             let mut present_ids = Vec::with_capacity(100);
-
-            // The map of unacknowledged packets.
-            let mut packet_map = HashMap::new();
 
             // Create a new UDP socket and await handshake
             let udp = Self::new_sender();
 
             // Stop blocking.
-            tx_udp.send(true).unwrap();
+            main_sender.send(MainMessage::Init);
 
             // Set the intial packet id
-            set_packet_id(&mut buffer, timestamp, id);
+            set_packet_id(&mut buffer, id);
 
             // Start the event loop
             loop {
-                match rx_data.recv() {
+                match udp_sender_receiver.recv() {
                     // We received the last block to send. If the buffer is
                     // longer than 4 bytes, there is data present which must
                     // be sent.
-                    Ok(SenderMessage::EndOfData) => {
+                    Ok(SenderMessage::EndOfData(timestamp)) => {
                         if buffer.len() > 8 {
-                            let _ = udp.send(buffer.as_slice());
+                            buffer[0] = (timestamp >> 24) as u8;
+                            buffer[1] = (timestamp >> 16) as u8;
+                            buffer[2] = (timestamp >> 8) as u8;
+                            buffer[3] = timestamp as u8;
 
-                            packet_map.insert(id, present_ids.clone());
+                            let _ = udp.send(buffer.as_slice()).unwrap();
+                            to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone()));
                             present_ids.clear();
 
                             // Increment packet id.
@@ -95,7 +76,7 @@ impl Udp {
 
                         // Clear buffer and set appropriate packet id.
                         buffer.clear();
-                        set_packet_id(&mut buffer, timestamp, id);
+                        set_packet_id(&mut buffer, id);
                     },
                     // We received a new encoded macroblock to send. If the
                     // data is too long for the current buffer, its current
@@ -103,79 +84,55 @@ impl Udp {
                     // reinitialized, the blocks present are added to the map
                     // of unacknowledged packets and the current list is
                     // cleared. The block id is added to the current id list.
-                    Ok(SenderMessage::Macroblock(data)) => {
+                    Ok(SenderMessage::Macroblock(timestamp, data)) => {
                         if (buffer.len() + data.len()) >= MAX_BUFFER_SIZE {
+                            buffer[0] = (timestamp >> 24) as u8;
+                            buffer[1] = (timestamp >> 16) as u8;
+                            buffer[2] = (timestamp >> 8) as u8;
+                            buffer[3] = timestamp as u8;
+
                             let _ = udp.send(buffer.as_slice());
                             buffer.clear();
 
-                            packet_map.insert(id, present_ids.clone());
+                            to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone()));
                             present_ids.clear();
 
                             id += 1;
-                            set_packet_id(&mut buffer, timestamp, id);
+                            set_packet_id(&mut buffer, id);
                         }
 
                         // Add to packet id list.
                         present_ids.push(get_block_id(&data));
                         buffer.extend(data.iter().cloned());
                     },
-                    // TODO: send to context, not retriever?
-                    // A packet has been acknowledged, so we can send the list
-                    // of ids to the receiver thread and
-                    Ok(SenderMessage::AcknowledgePackets(ids)) => {
-                        for id in &ids {
-                            to_receiver.send(packet_map.get(&id).unwrap().clone()); // THIS GOES WRONG
-                            packet_map.remove(&id);
-                        }
-                    },
-                    Ok(SenderMessage::IncrementTimestamp) => timestamp += 1,
-                    Err(e) => ()
+                    _ => panic!()
                 }
             }
         });
-
-        // Block until handshake
-        rx_udp.recv().unwrap();
-
-        // Return to_sender channel
-        tx_data
     }
 
-    fn start_a_receiver_thread(to_sender: Sender<SenderMessage>,
-                               from_sender: Receiver<Vec<u16>>)
-        -> Receiver<Vec<u16>>
+    fn start_receiver_thread(to_pending_ack: Sender<PendingAckMessage>,
+                             main_sender: Sender<MainMessage>)
     {
-        let (to_context, from_receiver): (Sender<Vec<u16>>, Receiver<Vec<u16>>) = channel();
-
         let sock = match UdpSocket::bind("0.0.0.0:9998") {
-        Ok(s) => s,
-        Err(e) => panic!("Could not bind socket: {}", e)
-    };
+            Ok(s) => s,
+            Err(e) => panic!("Could not bind socket: {}", e)
+        };
 
         thread::spawn(move || {
-            let mut msg;
-
             loop {
                 let mut buf = vec![0u8; 800];
 
                 match sock.recv_from(buf.as_mut_slice()) {
                     Err(e) => panic!("Error receiving data: {}", e),
                     Ok((amt, _src)) => {
-                        // send ack to sender
-                        msg = SenderMessage::AcknowledgePackets(get_packet_ids(&buf));
-                        to_sender.send(msg);
-
-                        // receive block ids from sender, send them to context
-                        to_context.send(from_sender.recv().unwrap().clone());
-
-                        // clear the buffer
+                        let msg = PendingAckMessage::NewReceive(get_packet_ids(&buf));
+                        to_pending_ack.send(msg);
                         buf.clear();
                     }
                 };
             }
         });
-
-        from_receiver
     }
 
     fn new_sender() -> Self {
@@ -205,11 +162,11 @@ impl Udp {
     }
 }
 
-fn set_packet_id(buffer: &mut Vec<u8>, timestamp: u32, id: u32) {
-    buffer.push((timestamp >> 24) as u8);
-    buffer.push((timestamp >> 16) as u8);
-    buffer.push((timestamp >> 8) as u8);
-    buffer.push(timestamp as u8);
+fn set_packet_id(buffer: &mut Vec<u8>, id: u32) {
+    buffer.push(0u8);
+    buffer.push(0u8);
+    buffer.push(0u8);
+    buffer.push(0u8);
 
     buffer.push((id >> 24) as u8);
     buffer.push((id >> 16) as u8);
