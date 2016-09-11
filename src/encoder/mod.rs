@@ -5,18 +5,36 @@ fbe7a0c5dd90a69a3eb2bd18edd583f2156aa08f/src/jpeg/encoder.rs
 */
 
 mod fdct;
+mod entropy;
 
 use self::fdct::fdct;
-use super::context::Context;
-use super::entropy::build_huff_lut;
+
+use self::entropy::build_huff_lut;
+
 use super::tables::*;
-use super::util::{get_data, DataBox};
 
-use std::thread;
+use super::util::
+{
+    value_at,
+    DataBox
+};
 
-use super::messages::{ContextMessage, SenderMessage, EncoderMessage};
+use std::thread::{
+    self,
+    JoinHandle
+};
 
-use std::sync::mpsc::{Sender, Receiver};
+use super::messages::
+{
+    SenderMessage,
+    EncoderMessage
+};
+
+use std::sync::mpsc::
+{
+    Sender,
+    Receiver
+};
 
 use num_iter::range_step;
 
@@ -49,6 +67,7 @@ pub fn start_encoder_thread(width: isize,
                             bpp: isize,
                             udp_sender: Sender<SenderMessage>,
                             receiver: Receiver<EncoderMessage>)
+    -> JoinHandle<()>
 {
     thread::spawn(move || {
         let mut encoder = Encoder::new(width, height, bpp, udp_sender.clone());
@@ -62,12 +81,13 @@ pub fn start_encoder_thread(width: isize,
                     encoder.update_encode_rgb(data, &errors);
                 },
                 Ok(EncoderMessage::Close) => {
-                    udp_sender.send(SenderMessage::Close);
+                    udp_sender.send(SenderMessage::Close).unwrap();
+                    break;
                 },
                 _ => panic!()
-            }
-        }
-    });
+            };
+        };
+    })
 }
 
 impl Encoder {
@@ -106,7 +126,8 @@ impl Encoder {
         }
     }
 
-    fn initial_encode_rgb(&mut self, data: *mut i8) {
+    fn initial_encode_rgb(&mut self, data: *mut i8)
+    {
         let mut dct_yblock   = [0i32; 64];
         let mut dct_cb_block = [0i32; 64];
         let mut dct_cr_block = [0i32; 64];
@@ -160,7 +181,7 @@ impl Encoder {
 
                 if self.buffer.len() > 0 {
                     self.buffer.shrink_to_fit();
-                    self.udp_channel.send(SenderMessage::Macroblock(self.timestamp, self.buffer.clone()));
+                    self.udp_channel.send(SenderMessage::Macroblock(self.timestamp, self.buffer.clone())).unwrap();
                     self.buffer = Vec::with_capacity(768);
                 }
 
@@ -168,10 +189,14 @@ impl Encoder {
             }
         }
 
-        self.udp_channel.send(SenderMessage::EndOfData(self.timestamp));
+        self.udp_channel.send(SenderMessage::EndOfData(self.timestamp)).unwrap();
     }
 
-    fn update_encode_rgb(&mut self, data: *mut i8, errors: &Vec<(i64, usize)>) -> usize {
+    fn update_encode_rgb(&mut self,
+                         data: *mut i8,
+                         errors: &Vec<(i64, usize)>)
+        -> usize
+    {
         self.timestamp += 1;
 
         let mut dct_yblock   = [0i32; 64];
@@ -235,18 +260,19 @@ impl Encoder {
 
             if self.buffer.len() > 0 {
                 self.buffer.shrink_to_fit();
-                self.udp_channel.send(SenderMessage::Macroblock(self.timestamp, self.buffer.clone()));
+                self.udp_channel.send(SenderMessage::Macroblock(self.timestamp, self.buffer.clone())).unwrap();
                 self.buffer = Vec::with_capacity(768);
             }
 
             sent += 1;
         }
 
-        self.udp_channel.send(SenderMessage::EndOfData(self.timestamp));
+        self.udp_channel.send(SenderMessage::EndOfData(self.timestamp)).unwrap();
         sent
     }
 
-    fn huffman_encode(&mut self, val: u8, table: &[(u8, u16)]) {
+    fn huffman_encode(&mut self, val: u8, table: &[(u8, u16)])
+    {
         let (size, code) = table[val as usize];
 
         if size > 16 {
@@ -256,11 +282,12 @@ impl Encoder {
         self.write_bits(code, size)
     }
 
-    fn write_block(
-        &mut self,
-        block: &[i32],
-        dctable: &[(u8, u16)],
-        actable: &[(u8, u16)]) -> i32 {
+    fn write_block(&mut self,
+                   block: &[i32],
+                   dctable: &[(u8, u16)],
+                   actable: &[(u8, u16)])
+        -> i32
+    {
 
         // TODO: Differential DC encoding for macroblocks.
         let dcval = block[0];
@@ -268,8 +295,6 @@ impl Encoder {
         let (size, value) = encode_coefficient(diff);
         self.huffman_encode(size, dctable);
         self.write_bits(value, size);
-
-        let mut index = 0;
 
         // Figure F.2
         let mut zero_run = 0;
@@ -289,13 +314,10 @@ impl Encoder {
                 while zero_run > 15 {
                     self.huffman_encode(0xF0, actable);
                     zero_run -= 16;
-                    index += 16;
                 }
 
                 let (size, value) = encode_coefficient(block[UNZIGZAG[k] as usize]);
                 let symbol = (zero_run << 4) | size;
-
-                index += zero_run + 1;
 
                 self.huffman_encode(symbol, actable);
                 self.write_bits(value, size);
@@ -311,7 +333,8 @@ impl Encoder {
         dcval
     }
 
-    fn write_bits(&mut self, bits: u16, size: u8) {
+    fn write_bits(&mut self, bits: u16, size: u8)
+    {
         if size == 0 {
             return
         }
@@ -329,7 +352,8 @@ impl Encoder {
         }
     }
 
-    fn write_final_bits(&mut self) {
+    fn write_final_bits(&mut self)
+    {
         if self.nbits == 0 {
             self.accumulator = 0;
             return
@@ -364,8 +388,8 @@ fn copy_blocks_ycbcr(source: *mut i8,
                      size: isize,
                      yb: &mut [u8; 64],
                      cbb: &mut [u8; 64],
-                     crb: &mut [u8; 64]) {
-
+                     crb: &mut [u8; 64])
+{
     for y in 0isize..8 {
         for x in 0isize..8 {
             let ind = index + (y * width + x) * bpp;
@@ -385,7 +409,8 @@ fn copy_blocks_ycbcr(source: *mut i8,
     }
 }
 
-fn encode_coefficient(coefficient: i32) -> (u8, u16) {
+fn encode_coefficient(coefficient: i32) -> (u8, u16)
+{
     let mut magnitude = coefficient.abs() as u16;
     let mut num_bits  = 0u8;
 
@@ -405,7 +430,8 @@ fn encode_coefficient(coefficient: i32) -> (u8, u16) {
     (num_bits, val)
 }
 
-fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (u8, u8, u8)
+{
     let r = r as f32;
     let g = g as f32;
     let b = b as f32;
@@ -415,14 +441,4 @@ fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     let cr =  0.5f32    * r - 0.4187f32 * g - 0.0813f32 * b + 128f32;
 
     (y as u8, cb as u8, cr as u8)
-}
-
-fn value_at(s: *mut i8, index: isize, size: isize) -> u8 {
-    unsafe {
-        if index < size {
-            *s.offset(index) as u8
-        } else {
-            *s.offset(size - 1) as u8
-        }
-    }
 }

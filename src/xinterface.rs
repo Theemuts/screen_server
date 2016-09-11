@@ -1,12 +1,11 @@
 extern crate libc;
+
+use std::ptr::{null, null_mut};
+
 use super::x11::xlib;
 
-use std::ptr::{
-null,
-null_mut,
-};
-
-pub fn open_display() -> *mut xlib::Display {
+pub fn open_display() -> *mut xlib::Display
+{
     unsafe {
         let display = xlib::XOpenDisplay(null());
 
@@ -18,20 +17,25 @@ pub fn open_display() -> *mut xlib::Display {
     }
 }
 
-pub fn get_root_window(display: *mut xlib::Display) -> u64 {
+pub fn get_root_window(display: *mut xlib::Display) -> u64
+{
     unsafe {
         let screen_num = xlib::XDefaultScreen(display);
         xlib::XRootWindow(display, screen_num)
     }
 }
 
-pub fn get_image(display: *mut xlib::Display, root: u64,
-             width: u32, offset_x: i32,
-             height: u32, offset_y: i32)
-             -> *mut xlib::XImage {
+pub fn get_image(display: *mut xlib::Display,
+                 root: u64,
+                 width: u32,
+                 offset_x: i32,
+                 height: u32,
+                 offset_y: i32)
+    -> *mut xlib::XImage
+{
     unsafe {
-        let imag: *mut xlib::XImage = xlib::XGetImage(display, root,
-                                                      offset_x, offset_y, width, height,
+        let imag: *mut xlib::XImage = xlib::XGetImage(display, root, offset_x,
+                                                      offset_y, width, height,
                                                       xlib::XAllPlanes(),
                                                       xlib::ZPixmap);
 
@@ -43,7 +47,12 @@ pub fn get_image(display: *mut xlib::Display, root: u64,
     }
 }
 
-pub fn copy_image(image: *mut xlib::XImage, dest: &mut Vec<u8>, width: u32, height: u32) {
+// Todo: this is slow, don't use it.
+pub fn copy_image(image: *mut xlib::XImage,
+                  dest: &mut Vec<u8>,
+                  width: u32,
+                  height: u32)
+{
     let mut dest_ind = 0;
 
     for y in 0..height as i32 {
@@ -58,19 +67,22 @@ pub fn copy_image(image: *mut xlib::XImage, dest: &mut Vec<u8>, width: u32, heig
                 dest[dest_ind] = rpix;
                 dest[dest_ind + 1] = gpix;
                 dest[dest_ind + 2] = bpix;
+
                 dest_ind += 3;
             }
         }
     }
 }
 
-pub fn close_display(display: *mut xlib::Display) {
+pub fn close_display(display: *mut xlib::Display)
+{
     unsafe {
         xlib::XCloseDisplay(display);
     }
 }
 
-pub fn destroy_image(image: *mut xlib::XImage) {
+pub fn destroy_image(image: *mut xlib::XImage)
+{
     unsafe {
         xlib::XDestroyImage(image);
     }

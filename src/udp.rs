@@ -1,11 +1,22 @@
-use std::net::{SocketAddr, UdpSocket};
-use std::sync::mpsc::{Sender, Receiver, channel};
-use std::thread;
+use std::net::
+{
+    SocketAddr,
+    UdpSocket
+};
+
+use std::sync::mpsc::
+{
+    Sender,
+    Receiver,
+};
+
+use std::thread::
+{
+    self,
+    JoinHandle
+};
+
 use std::io::Result;
-
-use std::collections::HashMap;
-
-use std::time::{SystemTime, Duration};
 
 use super::messages::{SenderMessage, MainMessage, PendingAckMessage};
 
@@ -13,20 +24,18 @@ const MAX_BUFFER_SIZE: usize = 1000;
 
 pub struct Udp {
     socket: UdpSocket,
-    client: SocketAddr,
-    buffer: Vec<u8>
+    client: SocketAddr
 }
 
 pub fn init_udp_sockets(pending_ack_sender: Sender<PendingAckMessage>,
                         udp_sender_receiver: Receiver<SenderMessage>,
                         main_sender: Sender<MainMessage>)
+    -> (JoinHandle<()>, JoinHandle<()>)
 {
-    // TODO: make sure client and server can communicate.
+    let s_handle = Udp::start_sender_thread(pending_ack_sender.clone(), udp_sender_receiver, main_sender.clone());
+    let r_handle = Udp::start_receiver_thread(pending_ack_sender, main_sender);
 
-    // Create the sender thread first. This will block until a handshake
-    // has been made.
-    Udp::start_sender_thread(pending_ack_sender.clone(), udp_sender_receiver, main_sender.clone());
-    Udp::start_receiver_thread(pending_ack_sender, main_sender);
+    (s_handle, r_handle)
 }
 
 
@@ -34,6 +43,7 @@ impl Udp {
     fn start_sender_thread(to_pending_ack: Sender<PendingAckMessage>,
                            udp_sender_receiver: Receiver<SenderMessage>,
                            main_sender: Sender<MainMessage>)
+        -> JoinHandle<()>
     {
         // Spawn the sender thread.
         thread::spawn(move || {
@@ -48,7 +58,7 @@ impl Udp {
             let udp = Self::new_sender();
 
             // Stop blocking.
-            main_sender.send(MainMessage::Init);
+            main_sender.send(MainMessage::Init).unwrap();
 
             // Set the intial packet id
             set_packet_id(&mut buffer, id);
@@ -67,7 +77,7 @@ impl Udp {
                             buffer[3] = timestamp as u8;
 
                             let _ = udp.send(buffer.as_slice()).unwrap();
-                            to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone()));
+                            to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone())).unwrap();
                             present_ids.clear();
 
                             // Increment packet id.
@@ -91,10 +101,10 @@ impl Udp {
                             buffer[2] = (timestamp >> 8) as u8;
                             buffer[3] = timestamp as u8;
 
-                            let _ = udp.send(buffer.as_slice());
+                            let _ = udp.send(buffer.as_slice()).unwrap();
                             buffer.clear();
 
-                            to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone()));
+                            to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone())).unwrap();
                             present_ids.clear();
 
                             id += 1;
@@ -105,14 +115,19 @@ impl Udp {
                         present_ids.push(get_block_id(&data));
                         buffer.extend(data.iter().cloned());
                     },
+                    Ok(SenderMessage::Close) => {
+                        to_pending_ack.send(PendingAckMessage::Close).unwrap();
+                        break;
+                    }
                     _ => panic!()
-                }
-            }
-        });
+                };
+            };
+        })
     }
 
     fn start_receiver_thread(to_pending_ack: Sender<PendingAckMessage>,
                              main_sender: Sender<MainMessage>)
+        -> JoinHandle<()>
     {
         let sock = match UdpSocket::bind("0.0.0.0:9998") {
             Ok(s) => s,
@@ -125,17 +140,50 @@ impl Udp {
 
                 match sock.recv_from(buf.as_mut_slice()) {
                     Err(e) => panic!("Error receiving data: {}", e),
-                    Ok((amt, _src)) => {
-                        let msg = PendingAckMessage::NewReceive(get_packet_ids(&buf));
-                        to_pending_ack.send(msg);
-                        buf.clear();
+                    Ok((_amt, _src)) => {
+                        match buf[0] {
+                            0 => {
+                                let ids = get_packet_ids(&buf);
+                                let msg = PendingAckMessage::NewReceive(ids);
+
+                                to_pending_ack.send(msg).unwrap();
+                                buf.clear();
+                            }
+                            1 => {
+                                let msg = MainMessage::Close;
+
+                                main_sender.send(msg).unwrap();
+                                break;
+                            },
+                            2 => {
+                                let msg = MainMessage::ChangeView(buf[1]);
+                                main_sender.send(msg).unwrap();
+                            },
+                            3 => {
+                                let msg = MainMessage::Init;
+                                main_sender.send(msg).unwrap();
+
+                                let msg = PendingAckMessage::Clear;
+                                to_pending_ack.send(msg).unwrap();
+                            }
+                            4 => {
+                                let msg = MainMessage::Exit;
+                                main_sender.send(msg).unwrap();
+
+                                break;
+                            }
+                            _ => {
+                                panic!();
+                            }
+                        };
                     }
                 };
-            }
-        });
+            };
+        })
     }
 
-    fn new_sender() -> Self {
+    fn new_sender() -> Self
+    {
         let sock = match UdpSocket::bind("0.0.0.0:9999") {
             Ok(s) => s,
             Err(e) => panic!("Could not bind socket: {}", e)
@@ -147,7 +195,7 @@ impl Udp {
             Ok((_amt, src)) => {
                 let mut src = src.clone();
                 src.set_port(36492);
-                return Udp { socket: sock, client: src, buffer: buf }
+                return Udp { socket: sock, client: src }
             },
             Err(e) => {
                 panic!("couldn't recieve a datagram: {}", e);
@@ -155,14 +203,16 @@ impl Udp {
         }
     }
 
-    fn send(&self, buf: &[u8]) -> Result<usize> {
+    fn send(&self, buf: &[u8]) -> Result<usize>
+    {
         let size = try!(self.socket.send_to(buf, self.client));
 
         Ok(size)
     }
 }
 
-fn set_packet_id(buffer: &mut Vec<u8>, id: u32) {
+fn set_packet_id(buffer: &mut Vec<u8>, id: u32)
+{
     buffer.push(0u8);
     buffer.push(0u8);
     buffer.push(0u8);
@@ -174,17 +224,19 @@ fn set_packet_id(buffer: &mut Vec<u8>, id: u32) {
     buffer.push(id as u8);
 }
 
-fn get_packet_ids(buffer: &Vec<u8>) -> Vec<u32> {
-    let n_ids = buffer[0] as usize;
+fn get_packet_ids(buffer: &Vec<u8>) -> Vec<u32>
+{
+    let n_ids = buffer[1] as usize;
     let mut result = Vec::with_capacity(n_ids);
 
     for i in 0..n_ids {
-        result.push(((buffer[4 * i + 1] as u32) << 24) | ((buffer[4 * i + 2] as u32) << 16) | ((buffer[4 * i + 3] as u32) << 8) | (buffer[4 * i + 4] as u32))
+        result.push(((buffer[4 * i + 2] as u32) << 24) | ((buffer[4 * i + 3] as u32) << 16) | ((buffer[4 * i + 4] as u32) << 8) | (buffer[4 * i + 5] as u32))
     }
 
     result
 }
 
-fn get_block_id(data: &Vec<u8>) -> u16 {
+fn get_block_id(data: &Vec<u8>) -> u16
+{
     ((data[0] as u16) << 2) | ((data[1] as u16) >> 6)
 }

@@ -1,4 +1,4 @@
-use super::util::{get_data, DataBox};
+use super::util::DataBox;
 
 #[derive(Debug)]
 pub enum ContextMessage {
@@ -20,13 +20,15 @@ pub enum EncoderMessage {
 pub enum MainMessage {
     Init,
     ChangeView(u8),
-    Close
+    Close,
+    Exit
 }
 
 #[derive(Debug)]
 pub enum PendingAckMessage {
     NewSend(u32, u32, Vec<u16>),
     NewReceive(Vec<u32>),
+    Clear,
     Close
 }
 
@@ -34,10 +36,5 @@ pub enum PendingAckMessage {
 pub enum SenderMessage {
     EndOfData(u32),
     Macroblock(u32, Vec<u8>),
-    Close
-}
-
-#[derive(Debug)]
-pub enum ReceiverMessage {
     Close
 }

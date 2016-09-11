@@ -1,27 +1,42 @@
-use super::xinterface;
-use super::x11::xlib;
-use super::util::{get_data, DataBox};
-
-use std::fs::File;
-
-use std::io;
-use std::io::prelude::*;
-use std::io::BufWriter;
-
-use std::sync::mpsc::{Sender, Receiver, channel};
-
-use std::thread;
-
-use std::time::{SystemTime, Duration};
-
 use num_iter::range_step;
 
-use super::messages::{ContextMessage, EncoderMessage};
+use std::sync::mpsc::
+{
+    Sender,
+    Receiver
+};
+
+use std::thread::{
+    self,
+    JoinHandle
+};
+
+use super::messages::
+{
+    ContextMessage,
+    EncoderMessage
+};
+
+use super::util::
+{
+    get_data,
+    value_at,
+    DataBox
+};
+
+use super::x11::xlib::
+{
+    Display,
+    XImage
+};
+
+use super::xinterface;
 
 #[derive(Debug)]
-pub struct Context {
-    pub image_pointer: Option<*mut xlib::XImage>,
-    display: *mut xlib::Display,
+pub struct Context
+{
+    image_pointer: Option<*mut XImage>,
+    display: *mut Display,
     window: u64,
     width: u32,
     height: u32,
@@ -51,41 +66,51 @@ pub fn start_context_thread(width: u32,
                             offset_y: i32,
                             to_encoder: Sender<EncoderMessage>,
                             receiver: Receiver<ContextMessage>)
+    -> JoinHandle<()>
 {
-
     thread::spawn(move || {
         let mut context = Context::new(width, offset_x, height, offset_y);
 
         loop {
             match receiver.recv() {
                 Ok(ContextMessage::Init) => {
+                    context.reset_timestamp();
                     context.get_new_screenshot();
                     context.set_initial_state();
-                    to_encoder.send(EncoderMessage::FirstImage(get_data(context.image_pointer)));
+
+                    let data = get_data(context.image_pointer);
+                    let msg = EncoderMessage::FirstImage(data);
+
+                    to_encoder.send(msg).unwrap();
                 },
                 Ok(ContextMessage::Close) => {
                     context.close();
-                    to_encoder.send(EncoderMessage::Close);
+                    to_encoder.send(EncoderMessage::Close).unwrap();
+                    break
                 }
                 Ok(ContextMessage::NewScreenshot) => {
                     context.get_new_screenshot();
                     context.set_block_errors();
                     context.update_client_state();
+
                     let pnt = context.get_image_pointer();
-                    let msg = EncoderMessage::DataAndErrors(pnt, context.errors.clone());
-                    to_encoder.send(msg);
+                    let err = context.errors.clone();
+                    let msg = EncoderMessage::DataAndErrors(pnt, err);
+
+                    to_encoder.send(msg).unwrap();
                 },
                 Ok(ContextMessage::AckPackets(timestamp, ids)) => {
                     context.handle_ack(timestamp, &ids);
                 },
                 _ => panic!()
             };
-        }
-    });
+        };
+    })
 }
 
 impl Context {
-    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32) -> Self {
+    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32) -> Self
+    {
         if (height % 16 != 0) | (width % 16 != 0) {
             panic!("height and width must be divisible by 16")
         }
@@ -129,12 +154,19 @@ impl Context {
         c
     }
 
-    fn get_image_pointer(&self) -> DataBox {
+    pub fn reset_timestamp(&mut self) {
+        self.timestamp = 0;
+    }
+
+
+    fn get_image_pointer(&self) -> DataBox
+    {
         get_data(self.image_pointer)
     }
 
     // TODO: return pointer
-    fn get_new_screenshot(&mut self) {
+    fn get_new_screenshot(&mut self)
+    {
         // Delete old (is None if uninitialized)
         if let Some(im_pointer) = self.image_pointer {
             xinterface::destroy_image(im_pointer);
@@ -149,15 +181,21 @@ impl Context {
         self.image_pointer = Some(image);
     }
 
-    fn set_initial_state(&mut self) {
-        xinterface::copy_image(self.image_pointer.unwrap(), &mut self.client_state, self.width, self.height);
+    fn set_initial_state(&mut self)
+    {
+        xinterface::copy_image(self.image_pointer.unwrap(),
+                               &mut self.client_state,
+                               self.width,
+                               self.height);
     }
 
-    fn close(&self) {
+    fn close(&self)
+    {
         xinterface::close_display(self.display);
     }
 
-    fn set_block_errors(&mut self) {
+    fn set_block_errors(&mut self)
+    {
         let DataBox(data) = get_data(self.image_pointer);
         // Define here for speed
         let mut r;
@@ -199,7 +237,8 @@ impl Context {
         self.errors.sort_by(|a, b| b.cmp(a));
     }
 
-    fn generate_block_lookup_table(&mut self) {
+    fn generate_block_lookup_table(&mut self)
+    {
         let macroblocks_x = (self.width / self.macroblock_size) as usize;
         let mut col;
         let mut row;
@@ -214,18 +253,8 @@ impl Context {
         }
     }
 
-    fn store_client_state(&self) -> io::Result<()> {
-        let mut buffer = BufWriter::new(try!(File::create("foo.txt")));
-        for x in &self.client_state {
-            try!(write!(buffer, "{} ", x));
-        }
-
-        try!(buffer.flush());
-
-        Ok(())
-    }
-
-    fn update_client_state(&mut self) {
+    fn update_client_state(&mut self)
+    {
         let mut r;
         let mut g;
         let mut b;
@@ -268,21 +297,12 @@ impl Context {
         }
     }
 
-    fn handle_ack(&mut self, timestamp: u32, ids: &Vec<u16>) {
+    fn handle_ack(&mut self, timestamp: u32, ids: &Vec<u16>)
+    {
         for id in ids {
             if self.current_version[*id as usize] < timestamp {
                 self.current_version[*id as usize] = timestamp;
             }
-        }
-    }
-}
-
-fn value_at(s: *mut i8, index: isize, size: isize) -> u8 {
-    unsafe {
-        if index < size {
-            *s.offset(index) as u8
-        } else {
-            *s.offset(size - 1) as u8
         }
     }
 }
