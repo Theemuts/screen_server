@@ -3,7 +3,6 @@ This jpeg encoder implementation is largely copied from
 https://raw.githubusercontent.com/PistonDevelopers/image/
 fbe7a0c5dd90a69a3eb2bd18edd583f2156aa08f/src/jpeg/encoder.rs
 */
-
 mod fdct;
 mod entropy;
 
@@ -12,6 +11,8 @@ use self::fdct::fdct;
 use self::entropy::build_huff_lut;
 
 use super::tables::*;
+
+use super::monitor_info::MonitorInfo;
 
 use super::util::
 {
@@ -59,30 +60,33 @@ pub struct Encoder {
     buffer: Vec<u8>,
 
     size_accumulator: u64,
-    timestamp: u32
+    timestamp: u32,
+    monitor_info: Vec<MonitorInfo>
 }
 
-pub fn start_encoder_thread(width: isize,
-                            height: isize,
-                            bpp: isize,
+pub fn start_encoder_thread(monitor_info: Vec<MonitorInfo>,
                             udp_sender: Sender<SenderMessage>,
                             receiver: Receiver<EncoderMessage>)
     -> JoinHandle<()>
 {
     thread::spawn(move || {
-        let mut encoder = Encoder::new(width, height, bpp, udp_sender.clone());
+        let mut encoder = Encoder::new(monitor_info, udp_sender.clone());
 
         loop {
             match receiver.recv() {
                 Ok(EncoderMessage::FirstImage(DataBox(data))) => {
+                    println!("Encoder: First image");
+
                     encoder.initial_encode_rgb(data);
                 },
                 Ok(EncoderMessage::DataAndErrors(DataBox(data), errors)) => {
                     encoder.update_encode_rgb(data, &errors);
                 },
                 Ok(EncoderMessage::Close) => {
+                    println!("Encoder: Close");
+
                     udp_sender.send(SenderMessage::Close).unwrap();
-                    break;
+                    return;
                 },
                 _ => panic!()
             };
@@ -91,11 +95,12 @@ pub fn start_encoder_thread(width: isize,
 }
 
 impl Encoder {
-    fn new(width: isize,
-               height: isize,
-               bpp: isize,
-               sender: Sender<SenderMessage>) -> Self
+    fn new(monitor_info: Vec<MonitorInfo>,
+           sender: Sender<SenderMessage>) -> Self
     {
+        let width = monitor_info[0].view_width as isize;
+        let height = monitor_info[0].view_height as isize;
+
         let ld = build_huff_lut(&STD_LUMA_DC_CODE_LENGTHS, &STD_LUMA_DC_VALUES);
         let la = build_huff_lut(&STD_LUMA_AC_CODE_LENGTHS, &STD_LUMA_AC_VALUES);
 
@@ -116,13 +121,14 @@ impl Encoder {
             height: height,
             size: height * width * 4,
             macroblock_size: 16,
-            bpp: bpp,
+            bpp: monitor_info[0].raw_bpp,
             accumulator: 0,
             size_accumulator: 0,
             nbits: 0,
             buffer: Vec::with_capacity(768),
             udp_channel: sender,
-            timestamp: 0
+            timestamp: 0,
+            monitor_info: monitor_info
         }
     }
 
@@ -146,6 +152,8 @@ impl Encoder {
 
         let mut bl = 0;
 
+        self.timestamp += 1;
+
         for y0 in range_step(0, self.height, self.macroblock_size) {
             for x0 in range_step(0, self.width, self.macroblock_size) {
                 self.write_bits(bl as u16, 10);
@@ -155,7 +163,7 @@ impl Encoder {
                         x = x0 + 8*i;
                         y = y0 + 8*j;
                         let index = self.bpp * (y * self.width + x);
-                        copy_blocks_ycbcr(data, index, self.width, self.bpp, self.size, &mut yblock, &mut cb_block, &mut cr_block);
+                        copy_blocks_ycbcr(data, index, self.width, self.bpp, &mut yblock, &mut cb_block, &mut cr_block);
 
                         // Level shift and fdct
                         // Coeffs are scaled by 8
@@ -216,7 +224,7 @@ impl Encoder {
 
         for error in errors {
             let (err, block) = *error;
-            if err == 0 {
+            if err < 10000 {
                 // errors are sorted, 0 => no more changed blocks
                 // TODO: don't add zero-error blocks to the error vec?
                 break
@@ -235,7 +243,7 @@ impl Encoder {
             for y in range_step(y0, y0+16, 8) {
                 for x in range_step(x0, x0+16, 8) { // 2 * 4 * 8
                     let index = self.bpp * (y * self.width + x);
-                    copy_blocks_ycbcr(data, index, self.width, self.bpp, self.size, &mut yblock, &mut cb_block, &mut cr_block);
+                    copy_blocks_ycbcr(data, index, self.width, self.bpp, &mut yblock, &mut cb_block, &mut cr_block);
 
                     // Level shift and fdct
                     // Coeffs are scaled by 8
@@ -385,7 +393,6 @@ fn copy_blocks_ycbcr(source: *mut i8,
                      index: isize,
                      width: isize,
                      bpp: isize,
-                     size: isize,
                      yb: &mut [u8; 64],
                      cbb: &mut [u8; 64],
                      crb: &mut [u8; 64])
@@ -395,9 +402,9 @@ fn copy_blocks_ycbcr(source: *mut i8,
             let ind = index + (y * width + x) * bpp;
 
 
-            let b = value_at(source, ind, size);
-            let g = value_at(source, ind + 1, size);
-            let r = value_at(source, ind + 2, size);
+            let b = value_at(source, ind);
+            let g = value_at(source, ind + 1);
+            let r = value_at(source, ind + 2);
 
 
             let (yc, cb, cr) = rgb_to_ycbcr(r, g, b);

@@ -15,13 +15,9 @@ pub fn get_data(image_pointer: Option<*mut XImage>) -> DataBox
     }
 }
 
-pub fn value_at(s: *mut i8, index: isize, size: isize) -> u8
+pub fn value_at(s: *mut i8, index: isize) -> u8
 {
     unsafe {
-        if index < size {
-            *s.offset(index) as u8
-        } else {
-            *s.offset(size - 1) as u8
-        }
+        *s.offset(index) as u8
     }
 }

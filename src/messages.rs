@@ -1,10 +1,14 @@
+use std::net::SocketAddr;
+
 use super::util::DataBox;
 
 #[derive(Debug)]
 pub enum ContextMessage {
-    Init,
+    RequestView(u8, u8),
     Close,
-    ChangeView(u8),
+    Refresh,
+    SetSegment(u8),
+    SetScreen(u8),
     NewScreenshot,
     AckPackets(u32, Vec<u16>)
 }
@@ -16,12 +20,23 @@ pub enum EncoderMessage {
     Close
 }
 
+
+
 #[derive(Debug)]
 pub enum MainMessage {
-    Init,
-    ChangeView(u8),
-    Close,
-    Exit
+    Handshake(SocketAddr, u8, u8), // 0 (protocol version)
+    RequestScreenInfo,             // 1
+    RequestView(u8, u8),           // 2 (screenID, segmentID)
+    Refresh,                       // 3
+    Close,                         // 4
+    Exit,                          // 5
+
+    LeftClick(u16, u16),           // 6 (x0 y0)
+    RightClick(u16, u16),          // 7 (x0, y0)
+    DoubleClick(u16, u16),         // 8 (x0, y0)
+    Drag(u16, u16, u16, u16),      // 9 (x0, y0, x1, y1)
+
+    Keyboard(Vec<u8>),             // 10 (unicode string)
 }
 
 #[derive(Debug)]
@@ -34,6 +49,9 @@ pub enum PendingAckMessage {
 
 #[derive(Debug)]
 pub enum SenderMessage {
+    AcceptHandshake(SocketAddr, u8), // Address to send to and protocol version
+    RejectHandshake(SocketAddr),
+    ScreenInfo(Vec<u8>),
     EndOfData(u32),
     Macroblock(u32, Vec<u8>),
     Close

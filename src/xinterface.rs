@@ -1,4 +1,5 @@
 extern crate libc;
+extern crate regex;
 
 use std::ptr::{null, null_mut};
 

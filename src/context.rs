@@ -1,5 +1,7 @@
 use num_iter::range_step;
 
+use std::i64;
+
 use std::sync::mpsc::
 {
     Sender,
@@ -16,6 +18,8 @@ use super::messages::
     ContextMessage,
     EncoderMessage
 };
+
+use super::monitor_info::MonitorInfo;
 
 use super::util::
 {
@@ -57,24 +61,36 @@ pub struct Context
     block_table: Vec<usize>,
     timestamp: u32,
     current_version: Vec<u32>,
-    most_recent_version: Vec<u32>
+    most_recent_version: Vec<u32>,
+    monitor_info: Vec<MonitorInfo>,
+    screen_id: usize,
+    segment_id: usize
 }
 
-pub fn start_context_thread(width: u32,
-                            offset_x: i32,
-                            height: u32,
-                            offset_y: i32,
+pub fn start_context_thread(monitor_info: Vec<MonitorInfo>,
                             to_encoder: Sender<EncoderMessage>,
                             receiver: Receiver<ContextMessage>)
     -> JoinHandle<()>
 {
     thread::spawn(move || {
-        let mut context = Context::new(width, offset_x, height, offset_y);
+        let mut context = Context::new(monitor_info);
 
         loop {
             match receiver.recv() {
-                Ok(ContextMessage::Init) => {
-                    context.reset_timestamp();
+                Ok(ContextMessage::RequestView(screen, segment)) => {
+                    println!("Context: Request view ({}, {})", screen, segment);
+                    context.change_screen(screen as usize);
+                    context.change_segment(segment as usize);
+
+                    context.get_new_screenshot();
+                    context.set_initial_state();
+
+                    let data = get_data(context.image_pointer);
+                    let msg = EncoderMessage::FirstImage(data);
+
+                    to_encoder.send(msg).unwrap();
+                },
+                Ok(ContextMessage::Refresh) => {
                     context.get_new_screenshot();
                     context.set_initial_state();
 
@@ -84,9 +100,10 @@ pub fn start_context_thread(width: u32,
                     to_encoder.send(msg).unwrap();
                 },
                 Ok(ContextMessage::Close) => {
+                    println!("Context: Close");
                     context.close();
                     to_encoder.send(EncoderMessage::Close).unwrap();
-                    break
+                    return;
                 }
                 Ok(ContextMessage::NewScreenshot) => {
                     context.get_new_screenshot();
@@ -109,8 +126,13 @@ pub fn start_context_thread(width: u32,
 }
 
 impl Context {
-    pub fn new(width: u32, offset_x: i32, height: u32, offset_y: i32) -> Self
+    pub fn new(monitor_info: Vec<MonitorInfo>) -> Self
     {
+        let width = monitor_info[0].view_width;
+        let height = monitor_info[0].view_height;
+        let offset_x = monitor_info[0].offset_x;
+        let offset_y = monitor_info[0].offset_y;
+
         if (height % 16 != 0) | (width % 16 != 0) {
             panic!("height and width must be divisible by 16")
         }
@@ -147,17 +169,58 @@ impl Context {
             block_table: vec![0usize; (width*height) as usize],
             timestamp: 0,
             current_version: vec![0u32; (n_blocks_x * n_blocks_y / 4) as usize],
-            most_recent_version: vec![0u32; (n_blocks_x * n_blocks_y / 4) as usize]
+            most_recent_version: vec![0u32; (n_blocks_x * n_blocks_y / 4) as usize],
+            monitor_info: monitor_info,
+            screen_id: 0,
+            segment_id: 0,
         };
 
         c.generate_block_lookup_table();
         c
     }
 
-    pub fn reset_timestamp(&mut self) {
-        self.timestamp = 0;
+    fn change_screen(&mut self, screen_id: usize) -> bool {
+        if (self.screen_id != screen_id) & (screen_id < self.monitor_info.len()) {
+            self.screen_id = screen_id;
+
+            self.width = self.monitor_info[self.screen_id].view_width;
+            self.height = self.monitor_info[self.screen_id].view_height;
+            self.offset_x = self.monitor_info[self.screen_id].offset_x;
+            self.offset_y = self.monitor_info[self.screen_id].offset_y;
+
+            return true
+        }
+
+        false
     }
 
+    fn change_segment(&mut self, segment_id: usize) -> bool {
+        let n_segments_x = self.monitor_info[self.screen_id].midpoints_x.len();
+        let n_segments_y = self.monitor_info[self.screen_id].midpoints_y.len();
+        let n_segments = n_segments_x * n_segments_y;
+
+        if (self.segment_id != segment_id) & (segment_id < n_segments) {
+            self.segment_id = segment_id;
+
+            let screen_id = self.screen_id;
+
+            let offset_x = self.monitor_info[screen_id].offset_x;
+            let offset_y = self.monitor_info[screen_id].offset_y;
+
+            let segment_x = segment_id % n_segments_x;
+            let segment_y = segment_id / n_segments_x;
+
+            let midpoint_x = self.monitor_info[screen_id].midpoints_x[segment_x] as i32;
+            let midpoint_y = self.monitor_info[screen_id].midpoints_y[segment_y] as i32;
+
+            self.offset_x = offset_x + midpoint_x - 320;
+            self.offset_y = offset_y + midpoint_y - 184;
+
+            return true
+        }
+
+        false
+    }
 
     fn get_image_pointer(&self) -> DataBox
     {
@@ -183,6 +246,12 @@ impl Context {
 
     fn set_initial_state(&mut self)
     {
+        /*unsafe {
+            let s = (*self.image_pointer.unwrap()).data;
+            for i in 0 .. (self.bpp * self.width * self.height) as isize {
+                self.client_state[i as usize] = *s.offset(i) as u8;
+            }
+        }*/
         xinterface::copy_image(self.image_pointer.unwrap(),
                                &mut self.client_state,
                                self.width,
@@ -215,7 +284,6 @@ impl Context {
         let mut raw_ind;
         let mut state_ind;
 
-
         for (ind, block) in it {
             raw_ind = ind as isize * 4;
             state_ind = ind * 3;
@@ -231,9 +299,15 @@ impl Context {
             d_b = b as i64 - self.client_state[state_ind + 2] as i64;
 
             self.errors[*block].0 += d_r * d_r + d_g * d_g + d_b * d_b;
+
+            if (self.most_recent_version[*block] + 2 < self.timestamp) &
+                (self.current_version[*block] + 2 < self.timestamp) &
+                (self.most_recent_version[*block] > self.current_version[*block])
+            {
+                self.errors[*block].0 = i64::max_value();
+            }
         }
 
-        // Sort errors for consumption, largest errors first.
         self.errors.sort_by(|a, b| b.cmp(a));
     }
 
@@ -271,6 +345,7 @@ impl Context {
 
             self.most_recent_version[block] = self.timestamp;
 
+
             // Calculate initial index
             let x_block = block as isize % blocks_x;
             let x0 = x_block*64;
@@ -283,9 +358,9 @@ impl Context {
                         break
                     }
 
-                    b = value_at(data, ind, (self.width*self.height) as isize * 4);
-                    g = value_at(data, ind + 1, (self.width*self.height) as isize * 4);
-                    r = value_at(data, ind + 2, (self.width*self.height) as isize * 4);
+                    b = value_at(data, ind);
+                    g = value_at(data, ind + 1);
+                    r = value_at(data, ind + 2);
 
                     dest_ind = ind as usize*3/4;
 

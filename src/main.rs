@@ -1,5 +1,6 @@
 extern crate x11;
 extern crate num_iter;
+extern crate regex;
 
 mod context;
 mod encoder;
@@ -9,12 +10,16 @@ mod xinterface;
 mod udp;
 mod pending_acks;
 mod messages;
+mod monitor_info;
 
 use messages::
 {
     ContextMessage,
     MainMessage,
+    SenderMessage,
 };
+
+use monitor_info::MonitorInfo;
 
 use std::sync::mpsc::
 {
@@ -28,13 +33,12 @@ use std::thread::JoinHandle;
 
 use std::time:: Duration;
 
+const MIN_SUPPORTED_PROTOCOL_VERSION: u8 = 1;
+const MAX_SUPPORTED_PROTOCOL_VERSION: u8 = 1;
+
 fn main ()
 {
-    let width = 640u32;
-    let offset_x = 0;
-    let height = 368u32;
-    let offset_y = 0;
-    let raw_bpp = 4;
+    let monitor_info = MonitorInfo::get_all();
 
     //divide fr by 1.003, result is closer to wanted framerate.
     let mut fr = 10u64;
@@ -42,43 +46,107 @@ fn main ()
     let frame_duration = Duration::new(0, fr as u32);
 
     // Outer loop.
+    // Break from this loop to exit program.
     'outer: loop {
+        let mut src = None;
+        let mut has_init = false;
+        let mut protocol_version;
+
+        println!("Start threads.");
         let (context_handle, encoder_handle, pending_handle, sender_handle,
-            receiver_handle, context_sender, main_receiver) =
-            start_threads(width, offset_x, height, offset_y, raw_bpp);
+            receiver_handle, context_sender, udp_sender_sender,
+            main_receiver) = start_threads(&monitor_info);
 
-        // Await connection, then send initial image
-        match main_receiver.recv() {
-            Ok(MainMessage::Init) => context_sender.send(ContextMessage::Init).unwrap(),
-            _ => panic!("Did not initialize successfully.")
-        };
-
-        // Inner loop. Update image once per frame duration.
+        // Inner loop.
+        // Update image once per frame duration.
+        // Breaking from this loop will reset all threads.
         'inner: loop {
             match main_receiver.recv_timeout(frame_duration) {
-                Ok(MainMessage::ChangeView(v)) => {
-                    context_sender.send(ContextMessage::ChangeView(v)).unwrap();
+                Ok(MainMessage::Handshake(new_src, min, max))
+                    if (src == None)
+                    & (max >= MIN_SUPPORTED_PROTOCOL_VERSION)
+                    & (min <= MAX_SUPPORTED_PROTOCOL_VERSION) =>
+                {
+                    println!("Main: Accept handshake");
+
+                    // Pick the highest supported protocol version
+                    protocol_version = if max >= MAX_SUPPORTED_PROTOCOL_VERSION {
+                        MAX_SUPPORTED_PROTOCOL_VERSION
+                    } else {
+                        max
+                    };
+
+                    // Set the source to reject future handshake requests.
+                    src = Some(new_src);
+
+                    // Acknowledge handshake
+                    let msg = SenderMessage::AcceptHandshake(new_src, protocol_version);
+                    udp_sender_sender.send(msg).unwrap();
                 },
-                Ok(MainMessage::Init) => {
-                    context_sender.send(ContextMessage::Init).unwrap();
+                Ok(MainMessage::Handshake(new_src, _, _)) => {
+                    println!("Main: Reject handshake");
+                    // reject, there is another active connection.
+                    let msg = SenderMessage::RejectHandshake(new_src);
+                    udp_sender_sender.send(msg).unwrap();
+                },
+                Ok(MainMessage::RequestScreenInfo) => {
+                    if src.as_ref().is_some() {
+                        println!("Main: Request screen info");
+                        let msg = SenderMessage::ScreenInfo(MonitorInfo::serialize_vec(&monitor_info));
+                        udp_sender_sender.send(msg).unwrap();
+                    }
+                },
+                Ok(MainMessage::RequestView(screen, segment)) => {
+                    if src.as_ref().is_some() {
+                        println!("Main: Request view");
+                        let msg = ContextMessage::RequestView(screen, segment);
+                        context_sender.send(msg).unwrap();
+
+                        has_init = true;
+                    }
+                },
+                Ok(MainMessage::Refresh) => {
+                    if src.as_ref().is_some() {
+                        println!("Main: Refresh");
+                        let msg = ContextMessage::Refresh;
+                        context_sender.send(msg).unwrap();
+                    }
                 },
                 Ok(MainMessage::Close) => {
-                    context_sender.send(ContextMessage::Close).unwrap();
-                    join_threads(receiver_handle, context_handle, encoder_handle,
-                                 sender_handle, pending_handle);
+                    if src.as_ref().is_some() {
+                        println!("Main: Close");
+                        src = None;
+                        has_init = false;
 
-                    break 'inner; // Start waiting for connection
+                        context_sender.send(ContextMessage::Close).unwrap();
+
+                        join_threads(receiver_handle, context_handle,
+                                     encoder_handle, sender_handle,
+                                     pending_handle);
+
+                        break 'inner; // Start waiting for connection
+                    }
                 },
                 Ok(MainMessage::Exit) => {
-                    context_sender.send(ContextMessage::Close).unwrap();
-                    join_threads(receiver_handle, context_handle, encoder_handle,
-                                 sender_handle, pending_handle);
-                    break 'outer; // Exit server.
+                    if src.as_ref().is_some() {
+                        println!("Main: Exit");
+                        context_sender.send(ContextMessage::Close).unwrap();
+
+                        join_threads(receiver_handle, context_handle,
+                                     encoder_handle, sender_handle,
+                                     pending_handle);
+
+                        break 'outer; // Exit server.
+                    }
                 },
-                Err(RecvTimeoutError::Timeout) => {
-                    context_sender.send(ContextMessage::NewScreenshot).unwrap();
+                Err(RecvTimeoutError::Timeout) if has_init => {
+                    if src.as_ref().is_some() {
+                        let msg = ContextMessage::NewScreenshot;
+                        context_sender.send(msg).unwrap();
+                    }
                 },
-                _ => panic!()
+                Err(_) => (),
+                _ => panic!(),
             }
         }
     }
@@ -86,17 +154,14 @@ fn main ()
     println!("Closed.");
 }
 
-fn start_threads(width: u32,
-                 offset_x: i32,
-                 height: u32,
-                 offset_y: i32,
-                 raw_bpp: isize)
+fn start_threads(monitor_info: &Vec<MonitorInfo>)
     -> (JoinHandle<()>,
         JoinHandle<()>,
         JoinHandle<()>,
         JoinHandle<()>,
         JoinHandle<()>,
         Sender<ContextMessage>,
+        Sender<SenderMessage>,
         Receiver<MainMessage>)
 {
     // Create channels.
@@ -108,18 +173,13 @@ fn start_threads(width: u32,
 
     // Start threads
     let context_handle =
-        context::start_context_thread(width,
-                                      offset_x,
-                                      height,
-                                      offset_y,
+        context::start_context_thread(monitor_info.clone(),
                                       encoder_sender,
                                       context_receiver);
 
     let encoder_handle =
-        encoder::start_encoder_thread(width as isize,
-                                      height as isize,
-                                      raw_bpp,
-                                      udp_sender_sender,
+        encoder::start_encoder_thread(monitor_info.clone(),
+                                      udp_sender_sender.clone(),
                                       encoder_receiver);
 
     let pending_handle =
@@ -137,6 +197,7 @@ fn start_threads(width: u32,
      sender_handle,
      receiver_handle,
      context_sender,
+     udp_sender_sender,
      main_receiver)
 }
 
