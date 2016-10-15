@@ -18,13 +18,40 @@ use std::thread::
 
 use std::io::Result;
 
-use super::messages::{SenderMessage, MainMessage, PendingAckMessage};
+use super::protocol::
+{
+    SenderMessage,
+    MainMessage,
+    PendingAckMessage,
+    HeartbeatMessage,
+
+    OPCODE_RECEIVE_HANDSHAKE,
+    OPCODE_RECEIVE_REQUEST_SCREEN_INFO,
+    OPCODE_RECEIVE_REQUEST_VIEW,
+    OPCODE_RECEIVE_REFRESH,
+    OPCODE_RECEIVE_CLOSE,
+    OPCODE_RECEIVE_EXIT,
+    OPCODE_RECEIVE_LEFT_CLICK,
+    OPCODE_RECEIVE_RIGHT_CLICK,
+    OPCODE_RECEIVE_DOUBLE_CLICK,
+    OPCODE_RECEIVE_DRAG,
+    OPCODE_RECEIVE_KEYBOARD,
+    OPCODE_RECEIVE_ACK,
+    OPCODE_RECEIVE_HEARTBEAT,
+
+    OPCODE_SEND_HANDSHAKE_ACK,
+    OPCODE_SEND_SCREEN_INFO,
+    OPCODE_SEND_IMAGE_DATA,
+};
+
+use super::util::
+{
+    u8s_to_u16,
+    u8s_to_u32,
+};
 
 const MAX_BUFFER_SIZE: usize = 1000;
 
-const OPCODE_HANDSHAKE_ACK: u8 = 0;
-const OPCODE_SCREEN_INFO: u8 = 1;
-const OPCODE_IMAGE_DATA: u8 = 2;
 
 pub struct Udp {
     socket: UdpSocket,
@@ -33,15 +60,23 @@ pub struct Udp {
 
 pub fn init_udp_sockets(pending_ack_sender: Sender<PendingAckMessage>,
                         udp_sender_receiver: Receiver<SenderMessage>,
-                        main_sender: Sender<MainMessage>)
+                        main_sender: Sender<MainMessage>,
+                        heartbeat_sender: Sender<HeartbeatMessage>)
     -> (JoinHandle<()>, JoinHandle<()>)
 {
-    let s_handle = Udp::start_sender_thread(pending_ack_sender.clone(), udp_sender_receiver);
-    let r_handle = Udp::start_receiver_thread(pending_ack_sender, main_sender);
+    let s_handle = Udp::start_sender_thread(
+        pending_ack_sender.clone(),
+        udp_sender_receiver
+    );
+
+    let r_handle = Udp::start_receiver_thread(
+        pending_ack_sender,
+        main_sender,
+        heartbeat_sender
+    );
 
     (s_handle, r_handle)
 }
-
 
 impl Udp {
     fn start_sender_thread(to_pending_ack: Sender<PendingAckMessage>,
@@ -57,10 +92,10 @@ impl Udp {
             let mut buffer = Vec::with_capacity(MAX_BUFFER_SIZE);
             let mut present_ids = Vec::with_capacity(100);
 
+            let mut new_len;
+
             // Create a new UDP socket and await handshake
             let mut udp = None;
-
-            //main_sender.send(MainMessage::Init).unwrap();
 
             // Set the intial packet id
             set_packet_id(&mut buffer, id);
@@ -71,15 +106,25 @@ impl Udp {
                     // We received the last block to send. If the buffer is
                     // longer than 4 bytes, there is data present which must
                     // be sent.
-                    Ok(SenderMessage::AcceptHandshake(src, protocol_version)) => {
+                    Ok(SenderMessage::AcceptHandshake(
+                           src,
+                           protocol_version))
+                    => {
                         println!("UDP Sender: Accept handshake");
 
-                        let reply = vec![OPCODE_HANDSHAKE_ACK, protocol_version];
+                        let reply = vec![
+                            OPCODE_SEND_HANDSHAKE_ACK,
+                            protocol_version
+                        ];
 
                         udp = Some(Self::new_sender(src));
-                        udp.as_ref().unwrap().send(reply.as_slice()).unwrap();
+                        udp.as_ref()
+                            .unwrap()
+                            .send(reply.as_slice())
+                            .unwrap();
                     },
-                    Ok(SenderMessage::ScreenInfo(info)) => {
+                    Ok(SenderMessage::ScreenInfo(info))
+                    => {
                         println!("UDP Receiver: Screen Info");
 
                         if udp.as_ref().is_some() {
@@ -88,17 +133,21 @@ impl Udp {
                             let mut i = 1;
                             let mut reply = vec![0u8; len];
 
-                            reply[0] = OPCODE_SCREEN_INFO;
+                            reply[0] = OPCODE_SEND_SCREEN_INFO;
 
                             for v in info {
                                 reply[i] = v;
                                 i += 1;
                             }
 
-                            udp.as_ref().unwrap().send(reply.as_slice()).unwrap();
+                            udp.as_ref()
+                                .unwrap()
+                                .send(reply.as_slice())
+                                .unwrap();
                         }
                     },
-                    Ok(SenderMessage::EndOfData(timestamp)) => {
+                    Ok(SenderMessage::EndOfData(timestamp))
+                    => {
                         if (&udp).is_some() {
                             if buffer.len() > 10 {
                                 buffer[1] = (timestamp >> 24) as u8;
@@ -106,12 +155,21 @@ impl Udp {
                                 buffer[3] = (timestamp >> 8) as u8;
                                 buffer[4] = timestamp as u8;
 
-                                buffer[9] = present_ids.len() as u8;
+                                udp.as_ref()
+                                    .unwrap()
+                                    .send(
+                                        buffer.as_slice()
+                                    ).unwrap();
 
-                                //println!("n blocks: {}", present_ids.len());
+                                to_pending_ack
+                                    .send(
+                                        PendingAckMessage::NewSend(
+                                            timestamp,
+                                            id,
+                                            present_ids.clone()
+                                        )
+                                    ).unwrap();
 
-                                let _ = udp.as_ref().unwrap().send(buffer.as_slice()).unwrap();
-                                to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone())).unwrap();
                                 present_ids.clear();
 
                                 // Increment packet id.
@@ -129,22 +187,33 @@ impl Udp {
                     // reinitialized, the blocks present are added to the map
                     // of unacknowledged packets and the current list is
                     // cleared. The block id is added to the current id list.
-                    Ok(SenderMessage::Macroblock(timestamp, data)) => {
+                    Ok(SenderMessage::Macroblock(timestamp, data))
+                    => {
                         if (&udp).is_some() {
-                            if (buffer.len() + data.len()) >= MAX_BUFFER_SIZE {
+                            new_len = buffer.len() + data.len();
+
+                            if (new_len) >= MAX_BUFFER_SIZE {
                                 buffer[1] = (timestamp >> 24) as u8;
                                 buffer[2] = (timestamp >> 16) as u8;
                                 buffer[3] = (timestamp >> 8) as u8;
                                 buffer[4] = timestamp as u8;
 
-                                buffer[9] = present_ids.len() as u8;
+                                udp.as_ref()
+                                    .unwrap()
+                                    .send(
+                                        buffer.as_slice()
+                                    ).unwrap();
 
-                                //println!("n blocks: {}", present_ids.len());
+                                to_pending_ack
+                                    .send(
+                                        PendingAckMessage::NewSend(
+                                            timestamp,
+                                            id,
+                                            present_ids.clone()
+                                        )
+                                    ).unwrap();
 
-                                let _ = udp.as_ref().unwrap().send(buffer.as_slice()).unwrap();
                                 buffer.clear();
-
-                                to_pending_ack.send(PendingAckMessage::NewSend(timestamp, id, present_ids.clone())).unwrap();
                                 present_ids.clear();
 
                                 id += 1;
@@ -160,9 +229,14 @@ impl Udp {
                         println!("UDP Sender: Close");
                         let reply = vec![3];
 
-                        udp.as_ref().unwrap().send(reply.as_slice()).unwrap();
+                        udp.as_ref()
+                            .unwrap()
+                            .send(reply.as_slice())
+                            .unwrap();
 
-                        to_pending_ack.send(PendingAckMessage::Close).unwrap();
+                        to_pending_ack
+                            .send(PendingAckMessage::Close)
+                            .unwrap();
                         return;
                     }
                     _ => ()
@@ -172,7 +246,8 @@ impl Udp {
     }
 
     fn start_receiver_thread(to_pending_ack: Sender<PendingAckMessage>,
-                             main_sender: Sender<MainMessage>)
+                             main_sender: Sender<MainMessage>,
+                             heartbeat_sender: Sender<HeartbeatMessage>)
         -> JoinHandle<()>
     {
         let sock = match UdpSocket::bind("0.0.0.0:9998") {
@@ -188,76 +263,143 @@ impl Udp {
                     Err(e) => panic!("Error receiving data: {}", e),
                     Ok((amt, src)) => {
                         match buf[0] {
-                            0 if amt == 3 => {
+                            OPCODE_RECEIVE_HANDSHAKE
+                                if amt == 3
+                            => {
                                 println!("UDP Receiver: Handshake");
-                                let msg = MainMessage::Handshake(src, buf[1], buf[2]);
-                                main_sender.send(msg).unwrap();
+                                main_sender
+                                    .send(MainMessage::Handshake(
+                                        src,
+                                        buf[1],
+                                        buf[2])
+                                    ).unwrap();
                             },
-                            1 if amt == 1 => {
+
+                            OPCODE_RECEIVE_REQUEST_SCREEN_INFO
+                                if amt == 1
+                            => {
                                 println!("UDP Receiver: Request screen info");
-                                let msg = MainMessage::RequestScreenInfo;
-                                main_sender.send(msg).unwrap();
+                                main_sender
+                                    .send(MainMessage::RequestScreenInfo)
+                                    .unwrap();
                             },
-                            2 if amt == 3 => {
+
+                            OPCODE_RECEIVE_REQUEST_VIEW
+                                if amt == 3
+                            => {
                                 println!("UDP Receiver: Request view");
-                                let msg = MainMessage::RequestView(buf[1], buf[2]);
-                                main_sender.send(msg).unwrap();
+                                main_sender
+                                    .send(MainMessage::RequestView(
+                                        buf[1],
+                                        buf[2])
+                                    ).unwrap();
                             },
-                            3 if amt == 1 => {
+
+                            OPCODE_RECEIVE_REFRESH
+                                if amt == 1
+                            => {
                                 println!("UDP Receiver: Refresh");
-                                let msg = MainMessage::Refresh;
-                                main_sender.send(msg).unwrap();
+                                main_sender
+                                    .send(MainMessage::Refresh)
+                                    .unwrap();
                             },
-                            4 if amt == 1 => {
+
+                            OPCODE_RECEIVE_CLOSE
+                                if amt == 1
+                            => {
                                 println!("UDP Receiver: Close");
-                                let msg = MainMessage::Close;
-                                main_sender.send(msg).unwrap();
+                                main_sender
+                                    .send(MainMessage::Close)
+                                    .unwrap();
+
+                                heartbeat_sender
+                                    .send(HeartbeatMessage::Close)
+                                    .unwrap();
                                 return;
                             },
-                            5 if amt == 1 => {
+
+                            OPCODE_RECEIVE_EXIT
+                                if amt == 1
+                            => {
                                 println!("UDP Receiver: Exit");
-                                let msg = MainMessage::Exit;
-                                main_sender.send(msg).unwrap();
+                                main_sender
+                                    .send(MainMessage::Exit)
+                                    .unwrap();
+
+                                heartbeat_sender
+                                    .send(HeartbeatMessage::Close)
+                                    .unwrap();
                                 return;
                             },
-                            6 if amt == 5 => {
-                                let x = ((buf[1] as u16) << 8) | (buf[2] as u16);
-                                let y = ((buf[3] as u16) << 8) | (buf[4] as u16);
-                                let msg = MainMessage::LeftClick(x, y);
-                                main_sender.send(msg).unwrap();
-                            },
-                            7 if amt == 5 => {
-                                let x = ((buf[1] as u16) << 8) | (buf[2] as u16);
-                                let y = ((buf[3] as u16) << 8) | (buf[4] as u16);
-                                let msg = MainMessage::RightClick(x, y);
-                                main_sender.send(msg).unwrap();
-                            },
-                            8 if amt == 5 => {
-                                let x = ((buf[1] as u16) << 8) | (buf[2] as u16);
-                                let y = ((buf[3] as u16) << 8) | (buf[4] as u16);
-                                let msg = MainMessage::DoubleClick(x, y);
-                                main_sender.send(msg).unwrap();
-                            },
-                            9 if amt == 9 => {
-                                let x0 = ((buf[1] as u16) << 8) | (buf[2] as u16);
-                                let y0 = ((buf[3] as u16) << 8) | (buf[4] as u16);
-                                let x1 = ((buf[5] as u16) << 8) | (buf[6] as u16);
-                                let y1 = ((buf[7] as u16) << 8) | (buf[7] as u16);
-                                let msg = MainMessage::Drag(x0, y0, x1, y1);
-                                main_sender.send(msg).unwrap();
-                            },
-                            11 => {
-                                //println!("UDP Receiver: Receive ack");
 
-                                let ids = get_packet_ids(&buf);
+                            OPCODE_RECEIVE_LEFT_CLICK
+                                if amt == 5
+                            => {
+                                main_sender
+                                    .send(MainMessage::LeftClick(
+                                        u8s_to_u16(buf[1], buf[2]),
+                                        u8s_to_u16(buf[3], buf[4]))
+                                    ).unwrap();
+                            },
+
+                            OPCODE_RECEIVE_RIGHT_CLICK
+                                if amt == 5
+                            => {
+                                main_sender
+                                    .send(MainMessage::RightClick(
+                                        u8s_to_u16(buf[1], buf[2]),
+                                        u8s_to_u16(buf[3], buf[4]))
+                                    ).unwrap();
+                            },
+
+                            OPCODE_RECEIVE_DOUBLE_CLICK
+                                if amt == 5
+                            => {
+                                main_sender
+                                    .send(MainMessage::DoubleClick(
+                                        u8s_to_u16(buf[1], buf[2]),
+                                        u8s_to_u16(buf[3], buf[4]))
+                                    ).unwrap();
+                            },
+
+                            OPCODE_RECEIVE_DRAG
+                                if amt == 9
+                            => {
+                                main_sender
+                                    .send(MainMessage::Drag(
+                                        u8s_to_u16(buf[1], buf[2]),
+                                        u8s_to_u16(buf[3], buf[4]),
+                                        u8s_to_u16(buf[5], buf[6]),
+                                        u8s_to_u16(buf[7], buf[8]))
+                                    ).unwrap();
+                            },
+
+                            OPCODE_RECEIVE_KEYBOARD
+                            => {
+                                main_sender
+                                    .send(MainMessage::Keyboard(buf))
+                                    .unwrap();
+                            },
+
+                            OPCODE_RECEIVE_ACK
+                            => {
+                                to_pending_ack
+                                    .send(PendingAckMessage::NewReceive(
+                                        get_packet_ids(&buf))
+                                    ).unwrap();
+
                                 buf.clear();
-
-                                let msg = PendingAckMessage::NewReceive(ids);
-                                to_pending_ack.send(msg).unwrap();
                             },
-                            _ => {
-                                ();
-                            }
+
+                            OPCODE_RECEIVE_HEARTBEAT
+                                if amt == 1
+                            => {
+                                heartbeat_sender
+                                    .send(HeartbeatMessage::Heartbeat)
+                                    .unwrap();
+                            },
+
+                            _ => ()
                         };
                     }
                 };
@@ -274,35 +416,28 @@ impl Udp {
         };
 
         src.set_port(36492);
-
-        Udp { socket: sock, client: src }
-
+        Udp {socket: sock, client: src}
     }
 
     fn send(&self, buf: &[u8]) -> Result<usize>
     {
-        let size = try!(self.socket.send_to(buf, self.client));
-
-        Ok(size)
+        Ok(try!(self.socket.send_to(buf, self.client)))
     }
 }
 
 fn set_packet_id(buffer: &mut Vec<u8>, id: u32)
 {
-    buffer.push(OPCODE_IMAGE_DATA);
+    buffer.push(OPCODE_SEND_IMAGE_DATA);
 
-    buffer.push(0u8);
-    buffer.push(0u8);
-    buffer.push(0u8);
-    buffer.push(0u8);
+    for _ in 0..4 {
+        buffer.push(0u8);
+    }
 
-    buffer.push((id >> 24) as u8);
-    buffer.push((id >> 16) as u8);
-    buffer.push((id >> 8) as u8);
-    buffer.push(id as u8);
-
-    buffer.push(0u8);
-}
+    for i in 0..4 {
+        buffer.push(
+            (id >> (24 - (3 - i)*8)) as u8
+        );
+    }}
 
 fn get_packet_ids(buffer: &Vec<u8>) -> Vec<u32>
 {
@@ -310,12 +445,20 @@ fn get_packet_ids(buffer: &Vec<u8>) -> Vec<u32>
     let mut result = Vec::with_capacity(n_ids);
 
     for i in 0..n_ids {
-        result.push(((buffer[4 * i + 2] as u32) << 24) | ((buffer[4 * i + 3] as u32) << 16) | ((buffer[4 * i + 4] as u32) << 8) | (buffer[4 * i + 5] as u32))
+        result.push(
+            u8s_to_u32(
+                buffer[4 * i + 2],
+                buffer[4 * i + 3],
+                buffer[4 * i + 4],
+                buffer[4 * i + 5]
+            )
+        );
     }
 
     result
 }
 
+#[inline(always)]
 fn get_block_id(data: &Vec<u8>) -> u16
 {
     ((data[0] as u16) << 2) | ((data[1] as u16) >> 6)

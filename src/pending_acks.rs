@@ -10,7 +10,7 @@ use std::thread::{
     JoinHandle
 };
 
-use super::messages::{ContextMessage, PendingAckMessage};
+use super::protocol::{ContextMessage, PendingAckMessage};
 
 pub fn start_pending_ack_thread(to_context: Sender<ContextMessage>,
                                 receiver: Receiver<PendingAckMessage>)

@@ -5,23 +5,26 @@ extern crate libxdo;
 
 mod context;
 mod encoder;
-mod tables;
-mod util;
-mod xinterface;
-mod udp;
-mod pending_acks;
-mod messages;
+mod heartbeat;
 mod monitor_info;
 mod mouse;
+mod pending_acks;
+mod protocol;
+mod tables;
+mod udp;
+mod util;
+mod xinterface;
 
-use messages::
+use monitor_info::MonitorInfo;
+
+use protocol::
 {
     ContextMessage,
     MainMessage,
     SenderMessage,
 };
 
-use monitor_info::MonitorInfo;
+use std::str;
 
 use std::sync::mpsc::
 {
@@ -33,7 +36,7 @@ use std::sync::mpsc::
 
 use std::thread::JoinHandle;
 
-use std::time:: Duration;
+use std::time::Duration;
 
 const MIN_SUPPORTED_PROTOCOL_VERSION: u8 = 1;
 const MAX_SUPPORTED_PROTOCOL_VERSION: u8 = 1;
@@ -56,9 +59,8 @@ fn main ()
         let mut protocol_version;
 
         println!("Start threads.");
-        let (context_handle, encoder_handle, pending_handle, sender_handle,
-            receiver_handle, context_sender, udp_sender_sender,
-            main_receiver) = start_threads(&monitor_info);
+        let (handles, context_sender, udp_sender_sender, main_receiver) =
+            start_threads(&monitor_info, 10);
 
         // Inner loop.
         // Update image once per frame duration.
@@ -66,7 +68,7 @@ fn main ()
         'inner: loop {
             match main_receiver.recv_timeout(frame_duration) {
                 Ok(MainMessage::Handshake(new_src, min, max))
-                    if (src == None)
+                    if src.as_ref().is_none()
                      & (max >= MIN_SUPPORTED_PROTOCOL_VERSION)
                      & (min <= MAX_SUPPORTED_PROTOCOL_VERSION) =>
                 {
@@ -88,7 +90,7 @@ fn main ()
                 },
                 Ok(MainMessage::Handshake(new_src, _, _)) => {
                     println!("Main: Reject handshake");
-                    // reject, there is another active connection.
+                    // reject, there is another active connection or unsupported protocol version.
                     let msg = SenderMessage::RejectHandshake(new_src);
                     udp_sender_sender.send(msg).unwrap();
                 },
@@ -120,9 +122,7 @@ fn main ()
                         println!("Main: Close");
                         context_sender.send(ContextMessage::Close).unwrap();
 
-                        join_threads(receiver_handle, context_handle,
-                                     encoder_handle, sender_handle,
-                                     pending_handle);
+                        join_threads(handles);
 
                         break 'inner; // Start waiting for connection
                     }
@@ -132,9 +132,7 @@ fn main ()
                         println!("Main: Exit");
                         context_sender.send(ContextMessage::Close).unwrap();
 
-                        join_threads(receiver_handle, context_handle,
-                                     encoder_handle, sender_handle,
-                                     pending_handle);
+                        join_threads(handles);
 
                         break 'outer; // Exit server.
                     }
@@ -167,6 +165,12 @@ fn main ()
                         xdo_session.mouse_up(1).unwrap();
                     }
                 },
+                Ok(MainMessage::Keyboard(data)) => {
+                    if src.as_ref().is_some() {
+                        let msg = str::from_utf8(&(data[1..])).unwrap();
+                        xdo_session.send_keysequence(&msg, 10).unwrap();
+                    }
+                },
                 Err(RecvTimeoutError::Timeout) if has_init => {
                     if src.as_ref().is_some() {
                         let msg = ContextMessage::NewScreenshot;
@@ -174,7 +178,6 @@ fn main ()
                     }
                 },
                 Err(_) => (),
-                _ => panic!(),
             }
         }
     }
@@ -182,62 +185,60 @@ fn main ()
     println!("Closed.");
 }
 
-fn start_threads(monitor_info: &Vec<MonitorInfo>)
-    -> (JoinHandle<()>,
-        JoinHandle<()>,
-        JoinHandle<()>,
-        JoinHandle<()>,
-        JoinHandle<()>,
+fn start_threads(monitor_info: &Vec<MonitorInfo>,
+                 heartbeat_timeout: u64)
+    -> (Vec<JoinHandle<()>>,
         Sender<ContextMessage>,
         Sender<SenderMessage>,
         Receiver<MainMessage>)
 {
+    let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(6);
     // Create channels.
     let (context_sender, context_receiver) = channel();
     let (encoder_sender, encoder_receiver) = channel();
     let (main_sender, main_receiver) = channel();
     let (pending_ack_sender, pending_ack_receiver) = channel();
     let (udp_sender_sender, udp_sender_receiver) = channel();
+    let (heartbeat_sender, heartbeat_receiver) = channel();
 
     // Start threads
-    let context_handle =
+    handles.push(
         context::start_context_thread(monitor_info.clone(),
                                       encoder_sender,
-                                      context_receiver);
+                                      context_receiver));
 
-    let encoder_handle =
+    handles.push(
         encoder::start_encoder_thread(monitor_info.clone(),
                                       udp_sender_sender.clone(),
-                                      encoder_receiver);
+                                      encoder_receiver));
 
-    let pending_handle =
+    handles.push(
         pending_acks::start_pending_ack_thread(context_sender.clone(),
-                                               pending_ack_receiver);
+                                               pending_ack_receiver));
 
     let (sender_handle, receiver_handle) =
         udp::init_udp_sockets(pending_ack_sender,
                               udp_sender_receiver,
-                              main_sender);
+                              main_sender.clone(),
+                              heartbeat_sender.clone());
 
-    (context_handle,
-     encoder_handle,
-     pending_handle,
-     sender_handle,
-     receiver_handle,
+    handles.push(sender_handle);
+    handles.push(receiver_handle);
+
+    handles.push(
+        heartbeat::start_heartbeat_thread(main_sender.clone(),
+                                          heartbeat_receiver,
+                                          heartbeat_timeout));
+
+    (handles,
      context_sender,
      udp_sender_sender,
      main_receiver)
 }
 
-fn join_threads(receiver_handle: JoinHandle<()>,
-                context_handle: JoinHandle<()>,
-                encoder_handle: JoinHandle<()>,
-                sender_handle: JoinHandle<()>,
-                pending_handle: JoinHandle<()>)
+fn join_threads(handles: Vec<JoinHandle<()>>)
 {
-    receiver_handle.join().unwrap();
-    context_handle.join().unwrap();
-    encoder_handle.join().unwrap();
-    sender_handle.join().unwrap();
-    pending_handle.join().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
 }

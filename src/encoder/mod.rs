@@ -25,7 +25,7 @@ use std::thread::{
     JoinHandle
 };
 
-use super::messages::
+use super::protocol::
 {
     SenderMessage,
     EncoderMessage

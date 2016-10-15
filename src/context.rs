@@ -13,7 +13,7 @@ use std::thread::{
     JoinHandle
 };
 
-use super::messages::
+use super::protocol::
 {
     ContextMessage,
     EncoderMessage
