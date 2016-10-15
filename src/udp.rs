@@ -162,7 +162,6 @@ impl Udp {
 
                         udp.as_ref().unwrap().send(reply.as_slice()).unwrap();
 
-                        udp = None;
                         to_pending_ack.send(PendingAckMessage::Close).unwrap();
                         return;
                     }
@@ -220,6 +219,32 @@ impl Udp {
                                 let msg = MainMessage::Exit;
                                 main_sender.send(msg).unwrap();
                                 return;
+                            },
+                            6 if amt == 5 => {
+                                let x = ((buf[1] as u16) << 8) | (buf[2] as u16);
+                                let y = ((buf[3] as u16) << 8) | (buf[4] as u16);
+                                let msg = MainMessage::LeftClick(x, y);
+                                main_sender.send(msg).unwrap();
+                            },
+                            7 if amt == 5 => {
+                                let x = ((buf[1] as u16) << 8) | (buf[2] as u16);
+                                let y = ((buf[3] as u16) << 8) | (buf[4] as u16);
+                                let msg = MainMessage::RightClick(x, y);
+                                main_sender.send(msg).unwrap();
+                            },
+                            8 if amt == 5 => {
+                                let x = ((buf[1] as u16) << 8) | (buf[2] as u16);
+                                let y = ((buf[3] as u16) << 8) | (buf[4] as u16);
+                                let msg = MainMessage::DoubleClick(x, y);
+                                main_sender.send(msg).unwrap();
+                            },
+                            9 if amt == 9 => {
+                                let x0 = ((buf[1] as u16) << 8) | (buf[2] as u16);
+                                let y0 = ((buf[3] as u16) << 8) | (buf[4] as u16);
+                                let x1 = ((buf[5] as u16) << 8) | (buf[6] as u16);
+                                let y1 = ((buf[7] as u16) << 8) | (buf[7] as u16);
+                                let msg = MainMessage::Drag(x0, y0, x1, y1);
+                                main_sender.send(msg).unwrap();
                             },
                             11 => {
                                 //println!("UDP Receiver: Receive ack");

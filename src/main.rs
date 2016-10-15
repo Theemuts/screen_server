@@ -1,6 +1,7 @@
 extern crate x11;
 extern crate num_iter;
 extern crate regex;
+extern crate libxdo;
 
 mod context;
 mod encoder;
@@ -11,6 +12,7 @@ mod udp;
 mod pending_acks;
 mod messages;
 mod monitor_info;
+mod mouse;
 
 use messages::
 {
@@ -38,6 +40,7 @@ const MAX_SUPPORTED_PROTOCOL_VERSION: u8 = 1;
 
 fn main ()
 {
+    let xdo_session = mouse::new_session();
     let monitor_info = MonitorInfo::get_all();
 
     //divide fr by 1.003, result is closer to wanted framerate.
@@ -64,8 +67,8 @@ fn main ()
             match main_receiver.recv_timeout(frame_duration) {
                 Ok(MainMessage::Handshake(new_src, min, max))
                     if (src == None)
-                    & (max >= MIN_SUPPORTED_PROTOCOL_VERSION)
-                    & (min <= MAX_SUPPORTED_PROTOCOL_VERSION) =>
+                     & (max >= MIN_SUPPORTED_PROTOCOL_VERSION)
+                     & (min <= MAX_SUPPORTED_PROTOCOL_VERSION) =>
                 {
                     println!("Main: Accept handshake");
 
@@ -115,9 +118,6 @@ fn main ()
                 Ok(MainMessage::Close) => {
                     if src.as_ref().is_some() {
                         println!("Main: Close");
-                        src = None;
-                        has_init = false;
-
                         context_sender.send(ContextMessage::Close).unwrap();
 
                         join_threads(receiver_handle, context_handle,
@@ -137,6 +137,34 @@ fn main ()
                                      pending_handle);
 
                         break 'outer; // Exit server.
+                    }
+                },
+                Ok(MainMessage::LeftClick(x, y)) => {
+                    if src.as_ref().is_some() {
+                        xdo_session.move_mouse(x as i32, y as i32, 0).unwrap();
+                        xdo_session.click(1).unwrap();
+                    }
+                },
+                Ok(MainMessage::RightClick(x, y)) => {
+                    if src.as_ref().is_some() {
+                        xdo_session.move_mouse(x as i32, y as i32, 0).unwrap();
+                        xdo_session.click(3).unwrap();
+                    }
+                },
+                Ok(MainMessage::DoubleClick(x, y)) => {
+                                        if src.as_ref().is_some() {
+                        xdo_session.move_mouse(x as i32, y as i32, 0).unwrap();
+                        xdo_session.click(1).unwrap();
+                        xdo_session.move_mouse(x as i32, y as i32, 0).unwrap();
+                        xdo_session.click(1).unwrap();
+                    }
+                },
+                Ok(MainMessage::Drag(x0, y0, x1, y1)) => {
+                    if src.as_ref().is_some() {
+                        xdo_session.move_mouse(x0 as i32, y0 as i32, 0).unwrap();
+                        xdo_session.mouse_down(1).unwrap();
+                        xdo_session.move_mouse(x1 as i32, y1 as i32, 0).unwrap();
+                        xdo_session.mouse_up(1).unwrap();
                     }
                 },
                 Err(RecvTimeoutError::Timeout) if has_init => {

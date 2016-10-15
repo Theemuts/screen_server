@@ -7,7 +7,7 @@ authors = ["thomas <thomas.v.d@gmail.com>"]
 libc = "0.2"
 num-iter = "0.1.32"
 regex = "0.1"
-uinput = "0.1.2"
+libxdo = "0.4.1"
 
 [dependencies.x11]
 version = "2.6.1"

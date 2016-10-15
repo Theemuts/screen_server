@@ -7,8 +7,6 @@ pub enum ContextMessage {
     RequestView(u8, u8),
     Close,
     Refresh,
-    SetSegment(u8),
-    SetScreen(u8),
     NewScreenshot,
     AckPackets(u32, Vec<u16>)
 }
@@ -43,7 +41,6 @@ pub enum MainMessage {
 pub enum PendingAckMessage {
     NewSend(u32, u32, Vec<u16>),
     NewReceive(Vec<u32>),
-    Clear,
     Close
 }
 
