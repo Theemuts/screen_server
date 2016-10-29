@@ -35,6 +35,7 @@ pub fn start_pending_ack_thread(to_context: Sender<ContextMessage>,
                     }
                 },
                 Ok(PendingAckMessage::Close) => {
+                    println!("PendingAcks: Close");
                     return;
                 },
                 _ => panic!()

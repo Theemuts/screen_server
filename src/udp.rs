@@ -16,7 +16,12 @@ use std::thread::
     JoinHandle
 };
 
-use std::io::Result;
+use std::time::Duration;
+
+use std::io::{
+    Result,
+    ErrorKind
+};
 
 use super::protocol::
 {
@@ -24,6 +29,7 @@ use super::protocol::
     MainMessage,
     PendingAckMessage,
     HeartbeatMessage,
+    ReceiverMessage,
 
     OPCODE_RECEIVE_HANDSHAKE,
     OPCODE_RECEIVE_REQUEST_SCREEN_INFO,
@@ -59,6 +65,7 @@ pub struct Udp {
 }
 
 pub fn init_udp_sockets(pending_ack_sender: Sender<PendingAckMessage>,
+                        udp_receiver_receiver: Receiver<ReceiverMessage>,
                         udp_sender_receiver: Receiver<SenderMessage>,
                         main_sender: Sender<MainMessage>,
                         heartbeat_sender: Sender<HeartbeatMessage>)
@@ -72,7 +79,8 @@ pub fn init_udp_sockets(pending_ack_sender: Sender<PendingAckMessage>,
     let r_handle = Udp::start_receiver_thread(
         pending_ack_sender,
         main_sender,
-        heartbeat_sender
+        heartbeat_sender,
+        udp_receiver_receiver
     );
 
     (s_handle, r_handle)
@@ -247,7 +255,8 @@ impl Udp {
 
     fn start_receiver_thread(to_pending_ack: Sender<PendingAckMessage>,
                              main_sender: Sender<MainMessage>,
-                             heartbeat_sender: Sender<HeartbeatMessage>)
+                             heartbeat_sender: Sender<HeartbeatMessage>,
+                             udp_receiver_receiver: Receiver<ReceiverMessage>)
         -> JoinHandle<()>
     {
         let sock = match UdpSocket::bind("0.0.0.0:9998") {
@@ -255,12 +264,13 @@ impl Udp {
             Err(e) => panic!("Could not bind socket: {}", e)
         };
 
+        sock.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+
         thread::spawn(move || {
             loop {
                 let mut buf = vec![0u8; 800];
 
                 match sock.recv_from(buf.as_mut_slice()) {
-                    Err(e) => panic!("Error receiving data: {}", e),
                     Ok((amt, src)) => {
                         match buf[0] {
                             OPCODE_RECEIVE_HANDSHAKE
@@ -312,9 +322,9 @@ impl Udp {
                                     .send(MainMessage::Close)
                                     .unwrap();
 
-                                heartbeat_sender
-                                    .send(HeartbeatMessage::Close)
-                                    .unwrap();
+                               // heartbeat_sender
+                                //    .send(HeartbeatMessage::Close)
+                                //    .unwrap();
                                 return;
                             },
 
@@ -326,9 +336,9 @@ impl Udp {
                                     .send(MainMessage::Exit)
                                     .unwrap();
 
-                                heartbeat_sender
-                                    .send(HeartbeatMessage::Close)
-                                    .unwrap();
+                               // heartbeat_sender
+                                //    .send(HeartbeatMessage::Close)
+                                //    .unwrap();
                                 return;
                             },
 
@@ -363,14 +373,16 @@ impl Udp {
                             },
 
                             OPCODE_RECEIVE_DRAG
-                                if amt == 9
+                                if amt == 13
                             => {
                                 main_sender
                                     .send(MainMessage::Drag(
                                         u8s_to_u16(buf[1], buf[2]),
                                         u8s_to_u16(buf[3], buf[4]),
-                                        u8s_to_u16(buf[5], buf[6]),
-                                        u8s_to_u16(buf[7], buf[8]))
+                                        buf[5], buf[6],
+                                        u8s_to_u16(buf[7], buf[8]),
+                                        u8s_to_u16(buf[9], buf[10]),
+                                        buf[11], buf[12])
                                     ).unwrap();
                             },
 
@@ -399,8 +411,20 @@ impl Udp {
                                     .unwrap();
                             },
 
-                            _ => ()
+                            _ => {
+                                println!(" ???" );
+                            }
                         };
+                    },
+                    Err(e)  => {
+                        if e.kind() == ErrorKind::WouldBlock {
+                            match udp_receiver_receiver.try_recv() {
+                                Ok(ReceiverMessage::HeartbeatTimeout) => return,
+                                _ => ()
+                            }
+                        } else {
+                            panic!(e);
+                        }
                     }
                 };
             };

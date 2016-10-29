@@ -300,12 +300,12 @@ impl Context {
 
             self.errors[*block].0 += d_r * d_r + d_g * d_g + d_b * d_b;
 
-            if (self.most_recent_version[*block] + 2 < self.timestamp) &
+            /*if (self.most_recent_version[*block] + 2 < self.timestamp) &
                 (self.current_version[*block] + 2 < self.timestamp) &
                 (self.most_recent_version[*block] > self.current_version[*block])
             {
                 self.errors[*block].0 = i64::max_value();
-            }
+            }*/
         }
 
         self.errors.sort_by(|a, b| b.cmp(a));

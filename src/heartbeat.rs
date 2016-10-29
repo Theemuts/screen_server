@@ -1,6 +1,7 @@
 use super::protocol::{
     MainMessage,
     HeartbeatMessage,
+    ReceiverMessage
 };
 
 use std::sync::mpsc::{
@@ -17,6 +18,7 @@ use std::thread::{
 use std::time::Duration;
 
 pub fn start_heartbeat_thread(to_main: Sender<MainMessage>,
+                              to_udp_receiver: Sender<ReceiverMessage>,
                               receiver: Receiver<HeartbeatMessage>,
                               timeout: u64)
     -> JoinHandle<()>
@@ -31,8 +33,10 @@ pub fn start_heartbeat_thread(to_main: Sender<MainMessage>,
             Ok(HeartbeatMessage::Heartbeat) => {
                 let timeout_duration = Duration::from_secs(timeout);
 
+                println!("Rec init hb");
                 loop {
                     match receiver.recv_timeout(timeout_duration) {
+                        Ok(HeartbeatMessage::Heartbeat) => (),
                         Ok(HeartbeatMessage::Close) => {
                             println!("Heartbeat: Close loop");
                             return
@@ -40,14 +44,20 @@ pub fn start_heartbeat_thread(to_main: Sender<MainMessage>,
                         Err(RecvTimeoutError::Timeout) => {
                             println!("Heartbeat: Timeout");
                             to_main.send(MainMessage::Close).unwrap();
+                            to_udp_receiver.send(ReceiverMessage::HeartbeatTimeout).unwrap();
+
                             return
                         },
-                        _ => (),
+                        Err(RecvTimeoutError::Disconnected) => {
+                            println!("Heartbeat: Timeout");
+                            to_main.send(MainMessage::Close).unwrap();
+                            return
+                        }
                     }
                 }
             },
             _ => {
-                panic!();
+                return
             }
         }
     })

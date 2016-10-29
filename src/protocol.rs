@@ -55,7 +55,7 @@ pub enum MainMessage {
     LeftClick(u16, u16),
     RightClick(u16, u16),
     DoubleClick(u16, u16),
-    Drag(u16, u16, u16, u16),
+    Drag(u16, u16, u8, u8, u16, u16, u8, u8),
 
     Keyboard(Vec<u8>),
 }
@@ -65,6 +65,11 @@ pub enum PendingAckMessage {
     NewSend(u32, u32, Vec<u16>),
     NewReceive(Vec<u32>),
     Close
+}
+
+#[derive(Debug)]
+pub enum ReceiverMessage {
+    HeartbeatTimeout
 }
 
 #[derive(Debug)]
